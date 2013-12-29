@@ -6,6 +6,10 @@ if [ -z "$CDD_FILE" ]; then
 fi
 export CDD_FILE
 
+if [ ! -e "$CDD_FILE" ]; then
+  touch $CDD_FILE
+fi
+
 if [ -z "$CDD_AUTO" ]; then
   CDD_AUTO=1
 fi
