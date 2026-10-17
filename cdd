@@ -7,7 +7,7 @@ fi
 export CDD_FILE
 
 if [ ! -e "$CDD_FILE" ]; then
-  touch $CDD_FILE
+  touch "$CDD_FILE"
 fi
 
 if [ -z "$CDD_AUTO" ]; then
@@ -15,34 +15,95 @@ if [ -z "$CDD_AUTO" ]; then
 fi
 export CDD_AUTO
 
+CDD_BACKEND=
 CDD_SESSION=
 CDD_WINDOW=
 CDD_PANE=
+CDD_DEFAULT_PANE=0
+CDD_KEY_PREFIX=
+CDD_KEY_SCOPE=
+CDD_KEY=
 
-if [ -n "$TMUX" ]; then
-  _cdd_key="$(tmux display -p '#S,#I.#P')"
-  _cdd_window_pane="${_cdd_key##*,}"
-  CDD_SESSION="${_cdd_key%,*}"
-  CDD_WINDOW="${_cdd_window_pane%%.*}"
-  CDD_PANE="${_cdd_window_pane#*.}"
-  if [[ $CDD_SESSION != *[^0-9]* ]]; then
-    CDD_SESSION=_
-  fi
-  unset _cdd_key _cdd_window_pane
+# CDD_MULTIPLEXER forces the backend: tmux, screen, herdr, none or auto.
+# When no multiplexer manages this shell, only "last" is registered.
+#
+# $TERM_PROGRAM identifies the innermost multiplexer so that nested
+# tmux/herdr setups record the pane that actually spawned this shell.
+case "${CDD_MULTIPLEXER:-auto}" in
+  auto)
+    case "${TERM_PROGRAM:-}" in
+      herdr) [ "${HERDR_ENV:-}" = 1 ] && CDD_BACKEND=herdr ;;
+      tmux) [ -n "$TMUX" ] && CDD_BACKEND=tmux ;;
+    esac
+    if [ -z "$CDD_BACKEND" ]; then
+      if [ -n "$TMUX" ]; then
+        CDD_BACKEND=tmux
+      elif [ -n "$STY" ]; then
+        CDD_BACKEND=screen
+      elif [ "${HERDR_ENV:-}" = 1 ]; then
+        CDD_BACKEND=herdr
+      fi
+    fi
+    ;;
+  herdr) [ "${HERDR_ENV:-}" = 1 ] && CDD_BACKEND=herdr ;;
+  tmux) [ -n "$TMUX" ] && CDD_BACKEND=tmux ;;
+  screen) [ -n "$STY" ] && CDD_BACKEND=screen ;;
+esac
 
-elif [ -n "$STY" ]; then
-  _cdd_host="$(hostname)"
-  CDD_SESSION="${STY#*.}"
-  if echo "$CDD_SESSION" | grep "^[^.]\+\.${_cdd_host%%.*}$" >/dev/null; then
-    CDD_SESSION=_
-  fi
-  CDD_WINDOW="$WINDOW"
-  CDD_PANE=0
-  unset _cdd_host
+case "$CDD_BACKEND" in
+  tmux)
+    if [ -n "$TMUX" ]; then
+      _cdd_key="$(tmux display -p '#S,#I.#P')"
+      _cdd_window_pane="${_cdd_key##*,}"
+      CDD_SESSION="${_cdd_key%,*}"
+      CDD_WINDOW="${_cdd_window_pane%%.*}"
+      CDD_PANE="${_cdd_window_pane#*.}"
+      if [[ $CDD_SESSION != *[^0-9]* ]]; then
+        CDD_SESSION=_
+      fi
+      unset _cdd_key _cdd_window_pane
+    fi
+    ;;
+
+  screen)
+    if [ -n "$STY" ]; then
+      _cdd_host="$(hostname)"
+      CDD_SESSION="${STY#*.}"
+      if echo "$CDD_SESSION" | grep "^[^.]\+\.${_cdd_host%%.*}$" >/dev/null; then
+        CDD_SESSION=_
+      fi
+      CDD_WINDOW="$WINDOW"
+      CDD_PANE=0
+      unset _cdd_host
+    fi
+    ;;
+
+  herdr)
+    if [ -n "$HERDR_PANE_ID" ]; then
+      CDD_SESSION="${HERDR_SESSION:-_}"
+      CDD_WINDOW="${HERDR_WORKSPACE_ID#w}"
+      CDD_PANE="${HERDR_PANE_ID##*:p}"
+      CDD_DEFAULT_PANE=1
+      CDD_KEY_PREFIX=herdr/
+      # Fall back to the sanitized raw IDs if Herdr changes its ID format.
+      case "${CDD_WINDOW:-x}${CDD_PANE:-x}" in
+        *[!0-9]*)
+          CDD_WINDOW="${HERDR_WORKSPACE_ID//:/_}"
+          CDD_PANE="${HERDR_PANE_ID##*:}"
+          CDD_PANE="${CDD_PANE//:/_}"
+          ;;
+      esac
+    fi
+    ;;
+esac
+
+CDD_SESSION="$(echo "$CDD_SESSION" | sed 's/[:,]/_/g')"
+CDD_KEY_SCOPE="${CDD_KEY_PREFIX}${CDD_SESSION}"
+if [ -n "$CDD_SESSION" ] && [ -n "$CDD_WINDOW" ]; then
+  CDD_KEY="${CDD_KEY_SCOPE},${CDD_WINDOW}.${CDD_PANE}"
 fi
-
-CDD_SESSION="$(echo "$CDD_SESSION" | sed 's/:/_/g')"
 export CDD_SESSION CDD_WINDOW CDD_PANE
+export CDD_BACKEND CDD_DEFAULT_PANE CDD_KEY_PREFIX CDD_KEY_SCOPE CDD_KEY
 
 
 cdd() {
@@ -83,8 +144,8 @@ cdd() {
 _cdd_chpwd() {
   (($CDD_AUTO)) || return
 
-  if [ -n "$CDD_WINDOW" ]; then
-    _cdd_register "$CDD_SESSION,$CDD_WINDOW.$CDD_PANE" "$PWD"
+  if [ -n "$CDD_KEY" ]; then
+    _cdd_register "$CDD_KEY" "$PWD"
   fi
   _cdd_register last "$PWD"
 }
@@ -102,10 +163,41 @@ Usage:
   cdd delete <key>              delete the directory from $CDD_FILE
   cdd help|--help|-h            print this help message
 
+Herdr:
+  In a Herdr pane, keys are herdr/<session>,<workspace>.<pane>
+  (for example herdr/main,1.2), and these short forms work:
+    cdd 1.2                     workspace 1, pane 2
+    cdd w1:p2                   same, using the Herdr pane ID
+    cdd p2                      pane 2 in the current workspace
+
 __EOT__
   if [ -f "$CDD_FILE" ]; then
     sort "$CDD_FILE" >&2
   fi
+}
+
+
+# Print the directory registered for the exact key ($1).
+_cdd_lookup() {
+  awk -F: -v key="$1" '
+    $1 == key {
+      sub(/^[^:]*:/, "")
+      print
+      found = 1
+      exit
+    }
+    END { exit !found }
+  ' "$CDD_FILE"
+}
+
+
+# Remove the exact key ($1) from $CDD_FILE.
+_cdd_remove_key() {
+  local tmp="$CDD_FILE.tmp.$$"
+  if awk -F: -v key="$1" '$1 != key' "$CDD_FILE" >"$tmp"; then
+    cat "$tmp" >"$CDD_FILE"
+  fi
+  rm -f "$tmp"
 }
 
 
@@ -117,9 +209,8 @@ _cdd_cd() {
 
   local key="$(_cdd_canonicalize_key "$1")"
 
-  local match="$(grep "^$key:" "$CDD_FILE")"
-  if [ -n "$match" ]; then
-    local dir="${match##*:}"
+  local dir
+  if dir="$(_cdd_lookup "$key")" && [ -n "$dir" ]; then
     echo "cd $dir"
     cd "$(echo "$dir" | sed "s;^~;$HOME;")"
 
@@ -132,10 +223,21 @@ _cdd_cd() {
 
 
 _cdd_add() {
-  local key="${1%%:*}"
+  local key="$1"
   local dir="$2"
 
-  local _dir
+  # "cdd add <key>:<directory>" is supported when <directory> is omitted.
+  # Herdr pane IDs contain ':' (e.g. w1:p2), so keep them intact.
+  if [ -z "$dir" ] && [ -n "$key" ]; then
+    case "$key" in
+      w[0-9]*:p[0-9]*) ;;
+      *:*) dir="${key#*:}"; key="${key%%:*}" ;;
+    esac
+  fi
+
+  key="$(_cdd_canonicalize_key "$key")"
+
+  local _dir result
   if [ -n "$dir" ]; then
     local _cdd_auto="$CDD_AUTO"
     CDD_AUTO=0
@@ -162,9 +264,8 @@ _cdd_delete() {
 
   local key="$(_cdd_canonicalize_key "$1")"
 
-  if grep "^$key:" "$CDD_FILE" >/dev/null; then
-    sed -i.tmp -e "/^$key\:/d" "$CDD_FILE"
-    rm -f "$CDD_FILE.tmp"
+  if _cdd_lookup "$key" >/dev/null; then
+    _cdd_remove_key "$key"
   else
     echo "cdd: $key: No such key"$'\n' >&2
     _cdd_help
@@ -174,16 +275,33 @@ _cdd_delete() {
 
 
 _cdd_canonicalize_key() {
-  local key="${1%%:*}"
+  local key="$1"
+
+  if [ "$CDD_BACKEND" = herdr ]; then
+    # Accept Herdr pane IDs and pane-only forms in the current workspace.
+    case "$key" in
+      w[0-9]*:p[0-9]*)
+        key="${key#w}"
+        key="${key%%:*}.${key##*:p}"
+        ;;
+      w[0-9]*.p[0-9]*)
+        key="${key#w}"
+        key="${key%%.*}.${key##*.p}"
+        ;;
+      p[0-9]*)
+        key="${CDD_WINDOW}.${key#p}"
+        ;;
+    esac
+  fi
 
   if echo "$key" | grep '^\(.\+,\)\?[0-9]\+\.\?$' >/dev/null; then
     if [[ $key != *. ]]; then
       key="$key."
     fi
-    key="${key}0"
+    key="${key}${CDD_DEFAULT_PANE}"
   fi
-  if echo "$key" | grep '^[0-9]\+.[0-9]\+$' >/dev/null; then
-    key="${CDD_SESSION:-_},$key"
+  if echo "$key" | grep '^[0-9]\+\.[0-9]\+$' >/dev/null; then
+    key="${CDD_KEY_SCOPE:-_},$key"
   fi
 
   echo "$key"
@@ -195,8 +313,7 @@ _cdd_register() {
   local dir="$2"
 
   if [ -f "$CDD_FILE" ]; then
-    sed -i.tmp -e "/^$key\:/d" "$CDD_FILE"
-    rm -f "$CDD_FILE.tmp"
+    _cdd_remove_key "$key"
   fi
 
   dir="$(echo "$dir" | sed "s;^$HOME;~;")"
@@ -208,15 +325,18 @@ _cdd_comp() {
   local mode="$1"
   local -i CURRENT="$2"
   local command="$3"
+  local line
 
   [ -f "$CDD_FILE" ] || return
 
   if (( CURRENT == 3 )) && [[ $command = delete ]] || (( CURRENT == 2 )); then
-    _cdd_opts="$(sed "s/^${CDD_SESSION:-_},//" "$CDD_FILE")"
+    _cdd_opts="$(while IFS= read -r line; do
+      printf '%s\n' "${line#"${CDD_KEY_SCOPE:-_},"}"
+    done < "$CDD_FILE")"
     _cdd_descr='cdd directory'
 
     if [ "$mode" = zsh ]; then
-      _cdd_opts="$(echo "$_cdd_opts" | sed 's/\.0:/:/')"
+      _cdd_opts="$(echo "$_cdd_opts" | sed "s;\\.${CDD_DEFAULT_PANE}:;:;")"
     fi
 
   elif (( CURRENT == 3 )) && [[ $command = add ]]; then
