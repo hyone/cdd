@@ -345,7 +345,7 @@ _cdd_list() {
     done
     printf 'FILE\n'
     cat "$CDD_FILE"
-  } | awk -v current="${CDD_SESSION:-}" '
+  } | awk '
     BEGIN { alphabet = "123456789ABCDEFGHJKMNPQRSTVWXYZ0" }
     function encode(value,   digit, encoded) {
       if (value == 0) return "0"
@@ -396,7 +396,7 @@ _cdd_list() {
       split(positions[lookup], p, " ")
       ws_pos = p[1]; tab_pos = p[2]; pane_pos = p[3]
       id = "w" encode(ws + 0) ":p" encode(pane + 0)
-      prefix = (session == current) ? "" : session ","
+      prefix = session ","
 
       if ((ws + 0) == (active[session] + 0)) {
         form = (pane_pos + 0 == 1) ? tab_pos : tab_pos "." pane_pos
@@ -405,7 +405,11 @@ _cdd_list() {
       }
       print prefix form " (" id "): " dir
     }
-  ' | sort
+  ' | sort | awk '
+    /^last:/ { last = $0; next }
+    { print }
+    END { if (last != "") print last }
+  '
 }
 
 

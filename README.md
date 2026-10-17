@@ -37,8 +37,10 @@ Herdr encodes numbers over 9 as `pA` (=10) in its IDs; cdd accepts both the
 Herdr ID form and the plain number (`cdd wA:p2`, `cdd 2.1`, ...).
 
 `cdd list` (and `cdd help`) shows each entry with its position key and stable
-pane ID, for example `sub,1 (w4:p4): ~/work/cdd`.  Entries of a session that
-is not running are shown in the stored `herdr/<session>,...` form.
+pane ID, for example `sub,1 (w4:p4): ~/work/cdd`.  The session name is always
+shown, including the current session (`main,1 (w1:p1)`), and `last` is listed
+at the end.  Entries of a session that is not running are shown in the stored
+`herdr/<session>,...` form.
 
 Find pane IDs with `herdr pane list`, `echo $HERDR_PANE_ID`, or the
 `workspace / tab / pane_id` detail line of the Goto picker (default
