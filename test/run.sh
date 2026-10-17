@@ -82,11 +82,22 @@ cat >"$TMP/herdr/sub.json" <<'__EOT__'
 ],"type":"pane_list"}}
 __EOT__
 
+# A pane list that the parser cannot read reliably (a "},{` inside a cwd
+# value splits the pane object before pane_id).
+cat >"$TMP/herdr/broken.json" <<'__EOT__'
+{"id":"cli:pane:list","result":{"panes":[
+{"workspace_id":"w1","cwd":"/tmp/a},{x","pane_id":"w1:p2","tab_id":"w1:t1","focused":true},
+{"workspace_id":"w1","cwd":"/tmp/b","pane_id":"w1:p5","tab_id":"w1:t1","focused":false}
+],"type":"pane_list"}}
+__EOT__
+
 cat >"$TMP/bin/herdr" <<'__EOT__'
 #!/bin/sh
 case "$*" in
   "pane list") cat "$HERDR_FIX/current.json" ;;
+  "--session main pane list") cat "$HERDR_FIX/current.json" ;;
   "--session sub pane list") cat "$HERDR_FIX/sub.json" ;;
+  "--session broken pane list") cat "$HERDR_FIX/broken.json" ;;
   "--session down pane list")
     echo '{"id":"cli:pane:list","error":{"code":"server_not_running","message":"no herdr server is running"}}'
     ;;
@@ -169,6 +180,12 @@ sub,2 -> herdr/sub,4.5
 pA -> pA
 w1:p5 -> w1:p5" "$out"
 
+out="$(run_herdr "$TMP/t5b.cdd" '
+  . "$1"
+  printf "%s -> %s\n" "main,1.2" "$(_cdd_expand_key "main,1.2")"
+')"
+check "herdr: explicit current session" "main,1.2 -> herdr/main,1.5" "$out"
+
 file="$TMP/t6.cdd"
 {
   printf 'herdr/main,1.2:%s\n' "$dir1"
@@ -222,6 +239,13 @@ cdd: down,1: herdr session 'down' is not running" "$out"
 out="$(run_herdr "$TMP/t7.cdd" '. "$1"; cdd 1.3 >/dev/null 2>&1; echo $?')"
 check "herdr: position error exit status" "3" "$out"
 
+out="$(run_herdr "$TMP/t7b.cdd" '
+  . "$1"
+  _cdd_expand_key broken,1
+' 2>&1)"
+check "herdr: unreadable pane list is an error" \
+  "cdd: broken,1: could not read panes from herdr" "$out"
+
 # --- herdr: add / delete ---------------------------------------------------
 
 out="$(run_herdr "$TMP/t8.cdd" '
@@ -252,6 +276,21 @@ out="$(run_herdr "$TMP/t9.cdd" '
 check "herdr: key removal matches exactly" \
   "1
 0" "$out"
+
+out="$(run_herdr "$TMP/t9b.cdd" '
+  . "$1"
+  cdd add "w1:p2:$2"
+  grep "^herdr/main,1.2:" "$CDD_FILE"
+  cdd add "herdr/main,1.5:$3"
+  grep "^herdr/main,1.5:" "$CDD_FILE"
+  cd "$3" || exit 1
+  cdd add w1:pB
+  grep "^herdr/main,1.11:" "$CDD_FILE"
+' "$dir1" "$dir2")"
+check "herdr: add with key:dir for pane ids" \
+  "herdr/main,1.2:$(expect_dir "$dir1")
+herdr/main,1.5:$(expect_dir "$dir2")
+herdr/main,1.11:$(expect_dir "$dir2")" "$out"
 
 # --- tmux ------------------------------------------------------------------
 
@@ -350,6 +389,12 @@ case "$out" in
     check "cdd help: includes the friendly list" "usage and main,1 (w1:p2): ..." "$out"
     ;;
 esac
+
+file="$TMP/t17b.cdd"
+printf 'herdr/broken,1.1:%s\n' "$dir1" >"$file"
+out="$(run_herdr "$file" '. "$1"; cdd list')"
+check "cdd list: unreadable session falls back to stored key" \
+  "herdr/broken,1.1: $(expect_dir "$dir1")" "$out"
 
 # --- zsh -------------------------------------------------------------------
 

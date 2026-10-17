@@ -249,6 +249,17 @@ _cdd_remove_key() {
 }
 
 
+# Count the pane_id fields in a "pane list" response ($1).
+_cdd_herdr_pane_count() {
+  printf '%s' "$1" | grep -o '"pane_id"' | wc -l | tr -d ' '
+}
+
+# Count the W records printed by _cdd_herdr_position_records ($1).
+_cdd_herdr_record_count() {
+  printf '%s\n' "$1" | grep -c '^W '
+}
+
+
 # Print "W <ws_pos> <tab_pos> <pane_pos> <ws_number> <pane_number>" for each
 # pane of a Herdr "pane list" response, and "A <active_ws_number>" at the end.
 # The list is in workspace, tab and layout order, which matches the order
@@ -322,7 +333,7 @@ _cdd_herdr_position_records() {
 _cdd_list() {
   [ -f "$CDD_FILE" ] || return 0
 
-  local sessions session records parsed
+  local sessions session records parsed wcount
   sessions="$(sed -n 's|^herdr/\([^,]*\),.*|\1|p' "$CDD_FILE" | sort -u)"
 
   {
@@ -334,10 +345,11 @@ _cdd_list() {
         records="$(herdr --session "$session" pane list 2>&1)"
       fi
       parsed="$(_cdd_herdr_position_records "$records")"
-      case "$parsed" in
-        *"W "*) ;;
-        *) continue ;;
-      esac
+      wcount="$(_cdd_herdr_record_count "$parsed")"
+      if [ "$wcount" = 0 ] || \
+         [ "$wcount" != "$(_cdd_herdr_pane_count "$records")" ]; then
+        continue
+      fi
       printf '%s\n' "$parsed" | \
         while IFS= read -r _cdd_record; do
           [ -n "$_cdd_record" ] && printf 'REC %s %s\n' "$session" "$_cdd_record"
@@ -438,6 +450,10 @@ _cdd_herdr_resolve_position() {
   esac
 
   records="$(_cdd_herdr_position_records "$raw")"
+  if [ "$(_cdd_herdr_record_count "$records")" != "$(_cdd_herdr_pane_count "$raw")" ]; then
+    _cdd_resolve_error="could not read panes from herdr"
+    return 1
+  fi
   active="$(printf '%s\n' "$records" | awk '$1 == "A" { print $2 }')"
   if [ -z "$active" ]; then
     _cdd_resolve_error="could not read panes from herdr"
@@ -592,13 +608,34 @@ _cdd_cd() {
 _cdd_add() {
   local key="$1"
   local dir="$2"
+  local _cdd_head _cdd_rest _cdd_pane _cdd_split_dir
 
   # "cdd add <key>:<directory>" is supported when <directory> is omitted.
-  # Herdr pane IDs contain ':' (e.g. w4:p2), so keep them intact.
+  # Herdr pane IDs contain ':' (e.g. w4:p2), so split them carefully.
   if [ -z "$dir" ] && [ -n "$key" ]; then
     case "$key" in
-      herdr/*) ;;
-      w[0-9A-Z]*:p[0-9A-Z]*|w[0-9A-Z]*.p[0-9A-Z]*) ;;
+      herdr/*)
+        case "$key" in
+          *:*) dir="${key#*:}"; key="${key%%:*}" ;;
+        esac
+        ;;
+      w*:p*)
+        _cdd_head="${key%%:*}"
+        _cdd_rest="${key#*:}"
+        _cdd_pane="${_cdd_rest%%:*}"
+        if [ "$_cdd_rest" = "$_cdd_pane" ]; then
+          _cdd_split_dir=
+        else
+          _cdd_split_dir="${_cdd_rest#*:}"
+        fi
+        if [ -n "$(_cdd_herdr_decode_number "${_cdd_head#w}")" ] && \
+           [ -n "$(_cdd_herdr_decode_number "${_cdd_pane#p}")" ]; then
+          key="$_cdd_head:$_cdd_pane"
+          dir="$_cdd_split_dir"
+        else
+          dir="${key#*:}"; key="${key%%:*}"
+        fi
+        ;;
       *:*) dir="${key#*:}"; key="${key%%:*}" ;;
     esac
   fi

@@ -46,6 +46,11 @@ Find pane IDs with `herdr pane list`, `echo $HERDR_PANE_ID`, or the
 `workspace / tab / pane_id` detail line of the Goto picker (default
 `prefix+g`).
 
+While running inside Herdr, a session-qualified numeric key such as
+`sub,1` is resolved as a Herdr position key first.  To reach a tmux entry
+with the same shape from a Herdr pane, use the exact stored key (for
+example `sub,1.0`).
+
 When tmux and Herdr are nested, the innermost multiplexer is detected via
 `$TERM_PROGRAM`. Set `CDD_MULTIPLEXER` to `herdr`, `tmux`, `screen`, `none`
 or `auto` (the default) to override the detection.
