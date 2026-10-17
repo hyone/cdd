@@ -167,6 +167,12 @@ cdd() {
         return $?
       fi
       ;;
+    list)
+      if [ $# -eq 1 ]; then
+        _cdd_list
+        return
+      fi
+      ;;
     *)
       if [ $# -eq 1 ]; then
         _cdd_cd "$1"
@@ -197,6 +203,7 @@ _cdd_help() {
 Usage:
   cdd [last]                    move to the last directory
   cdd <key>                     move to the <key> directory
+  cdd list                      list the registered directories
   cdd add <key> [directory]     add the directory to $CDD_FILE
   cdd delete <key>              delete the directory from $CDD_FILE
   cdd help|--help|-h            print this help message
@@ -213,9 +220,7 @@ Herdr:
     cdd p2                      pane number 2 in the current workspace
 
 __EOT__
-  if [ -f "$CDD_FILE" ]; then
-    sort "$CDD_FILE" >&2
-  fi
+  _cdd_list >&2
 }
 
 
@@ -309,6 +314,98 @@ _cdd_herdr_position_records() {
       print "A", active_ws
     }
   '
+}
+
+
+# Print registered directories.  Herdr entries are shown with the position
+# key and the stable pane ID, for example "sub,1 (w4:p4): ~/work/cdd".
+_cdd_list() {
+  [ -f "$CDD_FILE" ] || return 0
+
+  local sessions session records parsed
+  sessions="$(sed -n 's|^herdr/\([^,]*\),.*|\1|p' "$CDD_FILE" | sort -u)"
+
+  {
+    printf '%s\n' "$sessions" | while IFS= read -r session; do
+      [ -n "$session" ] || continue
+      if [ "$CDD_BACKEND" = herdr ] && [ "$session" = "$CDD_SESSION" ]; then
+        records="$(herdr pane list 2>&1)"
+      else
+        records="$(herdr --session "$session" pane list 2>&1)"
+      fi
+      parsed="$(_cdd_herdr_position_records "$records")"
+      case "$parsed" in
+        *"W "*) ;;
+        *) continue ;;
+      esac
+      printf '%s\n' "$parsed" | \
+        while IFS= read -r _cdd_record; do
+          [ -n "$_cdd_record" ] && printf 'REC %s %s\n' "$session" "$_cdd_record"
+        done
+    done
+    printf 'FILE\n'
+    cat "$CDD_FILE"
+  } | awk -v current="${CDD_SESSION:-}" '
+    BEGIN { alphabet = "123456789ABCDEFGHJKMNPQRSTVWXYZ0" }
+    function encode(value,   digit, encoded) {
+      if (value == 0) return "0"
+      encoded = ""
+      while (value > 0) {
+        digit = (value - 1) % 32
+        encoded = substr(alphabet, digit + 1, 1) encoded
+        value = int((value - 1) / 32)
+      }
+      return encoded
+    }
+    $1 == "REC" {
+      session = $2
+      if ($3 == "A") {
+        active[session] = $4
+      } else if ($3 == "W") {
+        positions[session "|" $7 "." $8] = $4 " " $5 " " $6
+      }
+      next
+    }
+    $0 == "FILE" { next }
+    {
+      colon = index($0, ":")
+      if (colon == 0) { print; next }
+      key = substr($0, 1, colon - 1)
+      dir = substr($0, colon + 1)
+
+      if (substr(key, 1, 6) != "herdr/") {
+        print key ": " dir
+        next
+      }
+      rest = substr(key, 7)
+      comma = index(rest, ",")
+      if (comma == 0) { print key ": " dir; next }
+      session = substr(rest, 1, comma - 1)
+      ws_pane = substr(rest, comma + 1)
+      dot = index(ws_pane, ".")
+      if (dot == 0) { print key ": " dir; next }
+      ws = substr(ws_pane, 1, dot - 1)
+      pane = substr(ws_pane, dot + 1)
+
+      lookup = session "|" ws "." pane
+      if (!(lookup in positions) || !(session in active)) {
+        print key ": " dir
+        next
+      }
+
+      split(positions[lookup], p, " ")
+      ws_pos = p[1]; tab_pos = p[2]; pane_pos = p[3]
+      id = "w" encode(ws + 0) ":p" encode(pane + 0)
+      prefix = (session == current) ? "" : session ","
+
+      if ((ws + 0) == (active[session] + 0)) {
+        form = (pane_pos + 0 == 1) ? tab_pos : tab_pos "." pane_pos
+      } else {
+        form = ws_pos "." tab_pos "." pane_pos
+      }
+      print prefix form " (" id "): " dir
+    }
+  ' | sort
 }
 
 

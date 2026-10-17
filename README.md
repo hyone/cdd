@@ -9,6 +9,7 @@ tmux 1.2 or higher, GNU screen and Herdr 0.9 or higher are supported.
 
     cdd [last]                    move to the last directory
     cdd <key>                     move to the <key> directory
+    cdd list                      list the registered directories
     cdd add <key> [directory]     add the directory to $CDD_FILE
     cdd delete <key>              delete the directory from $CDD_FILE
     cdd help|--help|-h            print this help message
@@ -34,6 +35,10 @@ Stable keys always refer to the same pane:
 
 Herdr encodes numbers over 9 as `pA` (=10) in its IDs; cdd accepts both the
 Herdr ID form and the plain number (`cdd wA:p2`, `cdd 2.1`, ...).
+
+`cdd list` (and `cdd help`) shows each entry with its position key and stable
+pane ID, for example `sub,1 (w4:p4): ~/work/cdd`.  Entries of a session that
+is not running are shown in the stored `herdr/<session>,...` form.
 
 Find pane IDs with `herdr pane list`, `echo $HERDR_PANE_ID`, or the
 `workspace / tab / pane_id` detail line of the Goto picker (default
