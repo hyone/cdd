@@ -229,6 +229,33 @@ last:$(expect_dir "$dir1")" "$out"
 1.2:$(expect_dir "$dir2")
 main,1.0:$(expect_dir "$dir3")
 last:$(expect_dir "$dir1")" "$out"
+
+  # Regression: zsh's noclobber option broke key replacement.
+  file="$TMP/t11c.cdd"
+  out="$(clean_env CDD_FILE="$file" TERM_PROGRAM=herdr HERDR_ENV=1 \
+    HERDR_SESSION=main HERDR_WORKSPACE_ID=w1 HERDR_PANE_ID=w1:p2 \
+    zsh -f -o noclobber -c '
+      autoload -U compinit; compinit -i 2>/dev/null
+      source "$1"
+      cd "$2" || exit 1
+      _cdd_chpwd
+      _cdd_chpwd
+      cat "$CDD_FILE"
+    ' _ "$CDD" "$dir4" 2>&1)"
+  check "zsh noclobber: no duplicate registration" \
+    "herdr/main,1.2:$(expect_dir "$dir4")
+last:$(expect_dir "$dir4")" "$out"
+
+  # Regression: sourcing the plugin twice must not register the hook twice.
+  out="$(clean_env CDD_FILE="$TMP/t11d.cdd" TERM_PROGRAM=herdr HERDR_ENV=1 \
+    HERDR_SESSION=main HERDR_WORKSPACE_ID=w1 HERDR_PANE_ID=w1:p2 \
+    zsh -f -c '
+      autoload -U compinit; compinit -i 2>/dev/null
+      source "$1"
+      source "$1"
+      print -r -- "${#chpwd_functions}"
+    ' _ "$ROOT/cdd.plugin.zsh" 2>/dev/null)"
+  check "zsh plugin: chpwd hook registered once" "1" "$out"
 else
   echo "skip - zsh not installed"
 fi
@@ -252,6 +279,19 @@ case "$out" in
     check "bash completion: herdr key candidate" "contains 1.2:$(expect_dir "$dir4")" "$out"
     ;;
 esac
+
+# Regression: bash's noclobber option must not break key replacement.
+out="$(run_herdr "$TMP/t12b.cdd" '
+  set -o noclobber
+  . "$1"
+  cd "$2" || exit 1
+  _cdd_chpwd
+  _cdd_chpwd
+  cat "$CDD_FILE"
+' "$dir4" 2>&1)"
+check "bash noclobber: no duplicate registration" \
+  "herdr/main,1.2:$(expect_dir "$dir4")
+last:$(expect_dir "$dir4")" "$out"
 
 echo
 echo "pass=$pass fail=$fail"

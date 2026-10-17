@@ -192,10 +192,11 @@ _cdd_lookup() {
 
 
 # Remove the exact key ($1) from $CDD_FILE.
+# Use >| so the replacement also works with zsh's noclobber option.
 _cdd_remove_key() {
   local tmp="$CDD_FILE.tmp.$$"
-  if awk -F: -v key="$1" '$1 != key' "$CDD_FILE" >"$tmp"; then
-    cat "$tmp" >"$CDD_FILE"
+  if awk -F: -v key="$1" '$1 != key' "$CDD_FILE" >|"$tmp"; then
+    cat "$tmp" >|"$CDD_FILE"
   fi
   rm -f "$tmp"
 }
