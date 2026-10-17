@@ -206,12 +206,16 @@ _cdd_remove_key() {
 }
 
 
-# Check that $1 looks like a Herdr ID token (a "w" or "p" prefix followed
-# by base32 characters).
+# Check that $1 looks like a Herdr ID token ("w" or "p" followed by one
+# or more base32 characters).
 _cdd_herdr_id_ok() {
-  local token="${1#w}"
-  token="${token#p}"
-  case "$token" in
+  local body
+  case "$1" in
+    w*) body="${1#w}" ;;
+    p*) body="${1#p}" ;;
+    *) return 1 ;;
+  esac
+  case "$body" in
     ''|*[!0-9A-Z]*) return 1 ;;
   esac
   return 0
@@ -371,12 +375,15 @@ _cdd_list() {
 }
 
 
-# Resolve a position key to a stable key: <session>,<ws>.<pane>.
+# Resolve a position key and store it in _cdd_resolved_key.
 # $1: session name (empty for the current session)
 # $2: first position, $3/$4: optional lower positions
+# Returns non-zero and sets _cdd_resolve_error on failure.
 _cdd_herdr_resolve_position() {
   local session="$1" c1="$2" c2="$3" c3="$4"
   local raw records active target scope
+
+  _cdd_resolved_key=
 
   if [ -n "$session" ]; then
     raw="$(herdr --session "$session" pane list 2>&1)"
@@ -433,7 +440,8 @@ _cdd_herdr_resolve_position() {
   else
     scope="$CDD_KEY_SCOPE"
   fi
-  printf '%s,%s.%s\n' "$scope" "$ws_id" "$pane_id"
+  _cdd_resolved_key="${scope},${ws_id}.${pane_id}"
+  return 0
 }
 
 
@@ -481,7 +489,7 @@ _cdd_herdr_position_parts() {
 # Expand a user key to the key used in $CDD_FILE.
 # Herdr position keys are resolved against the live session here.
 _cdd_expand_key() {
-  local key="$1" parts session c1 c2 c3
+  local key="$1" parts session c1 c2 c3 resolved
 
   if [ "$CDD_BACKEND" != herdr ]; then
     echo "$key"
@@ -495,9 +503,21 @@ _cdd_expand_key() {
       return 1
     fi
     if _cdd_herdr_resolve_position "$session" "$c1" "$c2" "$c3"; then
+      resolved="$_cdd_resolved_key"
+      # Prefer the resolved pane when its directory is registered.
+      if [ -f "$CDD_FILE" ] && _cdd_lookup "$resolved" >/dev/null 2>&1; then
+        echo "$resolved"
+        return 0
+      fi
+      # Session-qualified keys may also be literal keys (for example tmux).
+      if [ -n "$session" ] && [ -f "$CDD_FILE" ] && \
+         _cdd_lookup "$key" >/dev/null 2>&1; then
+        echo "$key"
+        return 0
+      fi
+      echo "$resolved"
       return 0
     fi
-    # Session-qualified keys may also be literal keys (for example tmux).
     if [ -n "$session" ] && [ -f "$CDD_FILE" ] && \
        _cdd_lookup "$key" >/dev/null 2>&1; then
       echo "$key"
@@ -615,11 +635,12 @@ _cdd_canonicalize_key() {
   local key="$1"
 
   if [ "$CDD_BACKEND" = herdr ]; then
-    local ws pane rest
+    local ws pane rest tail
     case "$key" in
       w*:*)
-        ws="${key%%:*}"; rest="${key#*:}"; pane="${rest%%:*}"
-        if _cdd_herdr_id_ok "$ws" && _cdd_herdr_id_ok "$pane"; then
+        ws="${key%%:*}"; rest="${key#*:}"; pane="${rest%%:*}"; tail="${rest#*:}"
+        if [ "$tail" = "$rest" ] && \
+           _cdd_herdr_id_ok "$ws" && _cdd_herdr_id_ok "$pane"; then
           key="${CDD_KEY_SCOPE},${ws}.${pane}"
         fi
         ;;

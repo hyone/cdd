@@ -145,7 +145,7 @@ check "herdr: session and pane namespace" "herdr/sub,w3.pB" "$out"
 
 out="$(run_herdr "$TMP/t4.cdd" '
   . "$1"
-  for key in 1 1. 1.2 w1:p2 w1.p2 p2 pB wA:pF w1:p11 herdr/main,w1.p2 last foo; do
+  for key in 1 1. 1.2 w1:p2 w1.p2 p2 pB wA:pF w1:p11 herdr/main,w1.p2 w1.2 p0 w1:p2:/tmp/y last foo; do
     printf "%s -> %s\n" "$key" "$(_cdd_canonicalize_key "$key")"
   done')"
 check "herdr: stable key canonicalization" \
@@ -159,6 +159,9 @@ pB -> herdr/main,w1.pB
 wA:pF -> herdr/main,wA.pF
 w1:p11 -> herdr/main,w1.p11
 herdr/main,w1.p2 -> herdr/main,w1.p2
+w1.2 -> w1.2
+p0 -> herdr/main,w1.p0
+w1:p2:/tmp/y -> w1:p2:/tmp/y
 last -> last
 foo -> foo" "$out"
 
@@ -238,6 +241,9 @@ cdd: down,1: herdr session 'down' is not running" "$out"
 
 out="$(run_herdr "$TMP/t7.cdd" '. "$1"; cdd 1.3 >/dev/null 2>&1; echo $?')"
 check "herdr: position error exit status" "3" "$out"
+
+out="$(run_herdr "$TMP/t7c.cdd" '. "$1"; cdd "w1:p2:/tmp/y" >/dev/null 2>&1; echo $?')"
+check "herdr: pane id with a trailing path is not trimmed" "3" "$out"
 
 out="$(run_herdr "$TMP/t7b.cdd" '
   . "$1"
@@ -354,6 +360,20 @@ out="$(run_herdr "$file" '. "$1"; cd /; cdd main,1.0; pwd' 2>/dev/null)"
 check "cross-backend lookup with a literal key" \
   "cd $(expect_dir "$dir1")
 $dir1" "$out"
+
+file="$TMP/t14b.cdd"
+printf 'main,1.1:%s\n' "$dir1" >"$file"
+out="$(run_herdr "$file" '. "$1"; cd /; cdd main,1.1; pwd' 2>/dev/null)"
+check "literal key wins when the resolved pane is unregistered" \
+  "cd $(expect_dir "$dir1")
+$dir1" "$out"
+
+file="$TMP/t14c.cdd"
+printf 'main,1.1:%s\nherdr/main,w1.p2:%s\n' "$dir1" "$dir2" >"$file"
+out="$(run_herdr "$file" '. "$1"; cd /; cdd main,1.1; pwd' 2>/dev/null)"
+check "resolved herdr pane wins when both keys are registered" \
+  "cd $(expect_dir "$dir2")
+$dir2" "$out"
 
 # --- cdd list --------------------------------------------------------------
 
