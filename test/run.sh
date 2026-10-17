@@ -343,6 +343,31 @@ main,1.1:'"$dir5"'
 last:'"$dir1"'
 herdr/sub,4.4:'"$dir4" "$out"
 
+  # Regression: zsh does not split unquoted expansions, so position keys
+  # must be parsed with read instead of `set -- $var`.
+  out="$(clean_env PATH="$TMP/bin:$PATH" HERDR_FIX="$TMP/herdr" CDD_FILE="$TMP/t15e.cdd" \
+    TERM_PROGRAM=herdr HERDR_ENV=1 HERDR_SESSION=main HERDR_WORKSPACE_ID=w1 HERDR_PANE_ID=w1:p2 \
+    zsh -f -c 'source "$1"
+      for key in 1 1.2 2.1 2.1.1 sub,1 sub,2; do
+        printf "%s -> %s\n" "$key" "$(_cdd_expand_key "$key")"
+      done' _ "$CDD" 2>/dev/null)"
+  check "zsh: position key resolution" \
+    "1 -> herdr/main,1.2
+1.2 -> herdr/main,1.5
+2.1 -> herdr/main,1.10
+2.1.1 -> herdr/main,9.3
+sub,1 -> herdr/sub,4.4
+sub,2 -> herdr/sub,4.5" "$out"
+
+  file="$TMP/t15f.cdd"
+  printf 'herdr/main,1.5:%s\n' "$dir2" >"$file"
+  out="$(clean_env PATH="$TMP/bin:$PATH" HERDR_FIX="$TMP/herdr" CDD_FILE="$file" \
+    TERM_PROGRAM=herdr HERDR_ENV=1 HERDR_SESSION=main HERDR_WORKSPACE_ID=w1 HERDR_PANE_ID=w1:p2 \
+    zsh -f -c 'source "$1"; cd / || exit 1; cdd 1.2; pwd' _ "$CDD" 2>/dev/null)"
+  check "zsh: cd by position key" \
+    "cd $(expect_dir "$dir2")
+$dir2" "$out"
+
   # Regression: zsh's noclobber option broke key replacement.
   file="$TMP/t15c.cdd"
   out="$(clean_env CDD_FILE="$file" TERM_PROGRAM=herdr HERDR_ENV=1 \

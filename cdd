@@ -367,13 +367,14 @@ _cdd_herdr_resolve_position() {
     return 1
   fi
 
-  set -- $target
+  local ws_num pane_num
+  read -r ws_num pane_num <<<"$target"
   if [ -n "$session" ]; then
     scope="${CDD_KEY_PREFIX}$(printf '%s' "$session" | sed 's/[:,]/_/g')"
   else
     scope="$CDD_KEY_SCOPE"
   fi
-  printf '%s,%s.%s\n' "$scope" "$1" "$2"
+  printf '%s,%s.%s\n' "$scope" "$ws_num" "$pane_num"
 }
 
 
@@ -381,7 +382,7 @@ _cdd_herdr_resolve_position() {
 # Position levels: c1=tab, c1.c2=tab.pane, c1.c2.c3=workspace.tab.pane.
 # A leading "<session>," targets another Herdr session.
 _cdd_herdr_position_parts() {
-  local key="$1" session pos part count
+  local key="$1" session pos
 
   case "$key" in
     *,*)
@@ -401,14 +402,14 @@ _cdd_herdr_position_parts() {
     ''|.*|*.|*..*|*[!0-9.]*) return 1 ;;
   esac
 
-  local _ifs="$IFS"
-  IFS=.
-  set -- $pos
-  IFS="$_ifs"
-  count=$#
-  [ "$count" -ge 1 ] && [ "$count" -le 3 ] || return 1
+  # Use read so that splitting also works with zsh, which does not split
+  # unquoted expansions like bash does.
+  local c1 c2 c3 rest
+  IFS=. read -r c1 c2 c3 rest <<<"$pos"
+  [ -z "$rest" ] || return 1
+  [ -n "$c1" ] || return 1
 
-  local c1="$1" c2="${2:-}" c3="${3:-}"
+  local part
   for part in "$c1" "$c2" "$c3"; do
     [ -n "$part" ] || continue
     [ "$part" -ge 1 ] 2>/dev/null || return 1
