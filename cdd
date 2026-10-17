@@ -325,6 +325,10 @@ _cdd_list() {
         active[session] = $4
       } else if ($3 == "W") {
         positions[session "|" $7 "." $8] = $4 " " $5 " " $6
+        if (!(session "|" $7 in ws_seen)) {
+          ws_seen[session "|" $7] = 1
+          ws_count[session]++
+        }
       }
       next
     }
@@ -360,7 +364,7 @@ _cdd_list() {
       id = ws ":" pane
       prefix = session ","
 
-      if (ws == active[session]) {
+      if ((ws_count[session] + 0) <= 1 && ws == active[session]) {
         form = (pane_pos + 0 == 1) ? tab_pos : tab_pos "." pane_pos
       } else {
         form = ws_pos "." tab_pos "." pane_pos

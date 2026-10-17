@@ -392,21 +392,21 @@ file="$TMP/t17.cdd"
 out="$(run_herdr "$file" '. "$1"; cdd list')"
 check "cdd list: position keys with stable pane IDs" \
   "herdr/down,w1.p1: $(expect_dir "$dir5")
-main,1 (w1:p2): $(expect_dir "$dir1")
 main,1.0: $(expect_dir "$dir6")
-main,1.2 (w1:p5): $(expect_dir "$dir2")
-main,2 (w1:pA): $(expect_dir "$dir3")
+main,1.1.1 (w1:p2): $(expect_dir "$dir1")
+main,1.1.2 (w1:p5): $(expect_dir "$dir2")
+main,1.2.1 (w1:pA): $(expect_dir "$dir3")
 main,2.1.1 (w9:p3): $(expect_dir "$dir4")
 sub,2 (w4:p5): $(expect_dir "$dir5")
 last: $(expect_dir "$dir1")" "$out"
 
 out="$(run_herdr "$file" '. "$1"; cdd help' 2>&1)"
 case "$out" in
-  *"cdd list"*"main,1 (w1:p2): $(expect_dir "$dir1")"*)
+  *"cdd list"*"main,1.1.1 (w1:p2): $(expect_dir "$dir1")"*)
     check "cdd help: includes the friendly list" ok ok
     ;;
   *)
-    check "cdd help: includes the friendly list" "usage and main,1 (w1:p2): ..." "$out"
+    check "cdd help: includes the friendly list" "usage and main,1.1.1 (w1:p2): ..." "$out"
     ;;
 esac
 
