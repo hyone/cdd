@@ -15,6 +15,44 @@ if [ -z "$CDD_AUTO" ]; then
 fi
 export CDD_AUTO
 
+
+# Herdr encodes public numbers in base32: 1..9, A=10, ... Z=31, 0=32.
+_cdd_herdr_decode_number() {
+  printf '%s\n' "$1" | awk '
+    BEGIN { alphabet = "123456789ABCDEFGHJKMNPQRSTVWXYZ0" }
+    {
+      value = 0
+      for (i = 1; i <= length($0); i++) {
+        digit = index(alphabet, substr($0, i, 1))
+        if (digit == 0) exit 1
+        value = value * 32 + digit
+      }
+      print value
+    }
+  '
+}
+
+_cdd_herdr_encode_number() {
+  printf '%s\n' "$1" | awk '
+    BEGIN { alphabet = "123456789ABCDEFGHJKMNPQRSTVWXYZ0" }
+    {
+      value = $0 + 0
+      if (value == 0) {
+        print "0"
+        exit
+      }
+      encoded = ""
+      while (value > 0) {
+        digit = (value - 1) % 32
+        encoded = substr(alphabet, digit + 1, 1) encoded
+        value = int((value - 1) / 32)
+      }
+      print encoded
+    }
+  '
+}
+
+
 CDD_BACKEND=
 CDD_SESSION=
 CDD_WINDOW=
@@ -79,12 +117,12 @@ case "$CDD_BACKEND" in
     ;;
 
   herdr)
+    CDD_DEFAULT_PANE=1
+    CDD_KEY_PREFIX=herdr/
     if [ -n "$HERDR_PANE_ID" ]; then
       CDD_SESSION="${HERDR_SESSION:-_}"
-      CDD_WINDOW="${HERDR_WORKSPACE_ID#w}"
-      CDD_PANE="${HERDR_PANE_ID##*:p}"
-      CDD_DEFAULT_PANE=1
-      CDD_KEY_PREFIX=herdr/
+      CDD_WINDOW="$(_cdd_herdr_decode_number "${HERDR_WORKSPACE_ID#w}")"
+      CDD_PANE="$(_cdd_herdr_decode_number "${HERDR_PANE_ID##*:p}")"
       # Fall back to the sanitized raw IDs if Herdr changes its ID format.
       case "${CDD_WINDOW:-x}${CDD_PANE:-x}" in
         *[!0-9]*)
@@ -164,11 +202,15 @@ Usage:
   cdd help|--help|-h            print this help message
 
 Herdr:
-  In a Herdr pane, keys are herdr/<session>,<workspace>.<pane>
-  (for example herdr/main,1.2), and these short forms work:
-    cdd 1.2                     workspace 1, pane 2
-    cdd w1:p2                   same, using the Herdr pane ID
-    cdd p2                      pane 2 in the current workspace
+  cdd records each pane as herdr/<session>,<workspace>.<pane> (stable IDs).
+  Position keys (resolved when cdd runs):
+    cdd 1.2                     tab 1, pane 2 in the current workspace
+    cdd 3.1.2                   workspace 3, tab 1, pane 2 of this session
+    cdd sub,1.2                 tab 1, pane 2 in the active workspace of sub
+    cdd sub,3.1.2               workspace 3, tab 1, pane 2 of session sub
+  Stable keys:
+    cdd w4:p2                   exact pane, as shown by "herdr pane list"
+    cdd p2                      pane number 2 in the current workspace
 
 __EOT__
   if [ -f "$CDD_FILE" ]; then
@@ -202,13 +244,235 @@ _cdd_remove_key() {
 }
 
 
+# Print "W <ws_pos> <tab_pos> <pane_pos> <ws_number> <pane_number>" for each
+# pane of a Herdr "pane list" response, and "A <active_ws_number>" at the end.
+# The list is in workspace, tab and layout order, which matches the order
+# shown in the Herdr UI.
+_cdd_herdr_position_records() {
+  printf '%s' "$1" | tr -d '\n\r' | \
+    sed -e 's/},{/}\n{/g' -e 's/}, {/}\n{/g' | awk '
+    BEGIN { alphabet = "123456789ABCDEFGHJKMNPQRSTVWXYZ0" }
+    function decode(s,   i, digit, value) {
+      if (s == "") return -1
+      value = 0
+      for (i = 1; i <= length(s); i++) {
+        digit = index(alphabet, substr(s, i, 1))
+        if (digit == 0) return -1
+        value = value * 32 + digit
+      }
+      return value
+    }
+    function str_field(line, key,   re, value) {
+      re = "\"" key "\": *\"[^\"]*\""
+      if (match(line, re) == 0) return ""
+      value = substr(line, RSTART, RLENGTH)
+      sub(".*: *\"", "", value)
+      sub("\"$", "", value)
+      return value
+    }
+    function bool_field(line, key,   re, value) {
+      re = "\"" key "\": *[a-z]+"
+      if (match(line, re) == 0) return ""
+      value = substr(line, RSTART, RLENGTH)
+      sub(".*: *", "", value)
+      return value
+    }
+    {
+      ws = str_field($0, "workspace_id")
+      tab = str_field($0, "tab_id")
+      pane = str_field($0, "pane_id")
+      focused = bool_field($0, "focused")
+      if (ws == "" || pane == "") next
+
+      if (ws != last_ws) {
+        ws_pos++
+        last_ws = ws
+        tab_pos = 0
+        last_tab = ""
+      }
+      if (tab != last_tab) {
+        tab_pos++
+        last_tab = tab
+        pane_pos = 0
+      }
+      pane_pos++
+
+      ws_num = decode(substr(ws, 2))
+      pane_num = decode(substr(pane, index(pane, ":p") + 2))
+      if (ws_num <= 0 || pane_num <= 0) next
+      if (ws_pos == 1 && first_ws == 0) first_ws = ws_num
+      if (focused == "true") active_ws = ws_num
+      print "W", ws_pos, tab_pos, pane_pos, ws_num, pane_num
+    }
+    END {
+      if (active_ws == 0) active_ws = first_ws
+      print "A", active_ws
+    }
+  '
+}
+
+
+# Resolve a position key to a stable key: <session>,<ws>.<pane>.
+# $1: session name (empty for the current session)
+# $2: first position, $3/$4: optional lower positions
+_cdd_herdr_resolve_position() {
+  local session="$1" c1="$2" c2="$3" c3="$4"
+  local raw records active target scope
+
+  if [ -n "$session" ]; then
+    raw="$(herdr --session "$session" pane list 2>&1)"
+  else
+    raw="$(herdr pane list 2>&1)"
+  fi
+
+  case "$raw" in
+    *server_not_running*)
+      _cdd_resolve_error="herdr session '${session}' is not running"
+      return 1
+      ;;
+    '')
+      _cdd_resolve_error="could not read panes from herdr"
+      return 1
+      ;;
+  esac
+
+  records="$(_cdd_herdr_position_records "$raw")"
+  active="$(printf '%s\n' "$records" | awk '$1 == "A" { print $2 }')"
+  if [ -z "$active" ]; then
+    _cdd_resolve_error="could not read panes from herdr"
+    return 1
+  fi
+  if [ "$active" -le 0 ] 2>/dev/null; then
+    _cdd_resolve_error="no panes found in herdr session '${session:-current}'"
+    return 1
+  fi
+
+  if [ -n "$c3" ]; then
+    target="$(printf '%s\n' "$records" | awk \
+      -v ws="$c1" -v tab="$c2" -v pane="$c3" \
+      '$1 == "W" && $2 == ws && $3 == tab && $4 == pane { print $5, $6; exit }')"
+  else
+    [ -n "$c2" ] || c2=1
+    target="$(printf '%s\n' "$records" | awk \
+      -v ws="$active" -v tab="$c1" -v pane="$c2" \
+      '$1 == "W" && $5 == ws && $3 == tab && $4 == pane { print $5, $6; exit }')"
+  fi
+
+  if [ -z "$target" ]; then
+    if [ -n "$c3" ]; then
+      _cdd_resolve_error="no pane at workspace $c1, tab $c2, pane $c3"
+    else
+      _cdd_resolve_error="no pane at tab $c1, pane $c2"
+    fi
+    return 1
+  fi
+
+  set -- $target
+  if [ -n "$session" ]; then
+    scope="${CDD_KEY_PREFIX}$(printf '%s' "$session" | sed 's/[:,]/_/g')"
+  else
+    scope="$CDD_KEY_SCOPE"
+  fi
+  printf '%s,%s.%s\n' "$scope" "$1" "$2"
+}
+
+
+# Print "session|c1|c2|c3" when $1 is a position key, otherwise fail.
+# Position levels: c1=tab, c1.c2=tab.pane, c1.c2.c3=workspace.tab.pane.
+# A leading "<session>," targets another Herdr session.
+_cdd_herdr_position_parts() {
+  local key="$1" session pos part count
+
+  case "$key" in
+    *,*)
+      session="${key%%,*}"
+      pos="${key#*,}"
+      case "$session" in
+        ''|*[!A-Za-z0-9_-]*) return 1 ;;
+      esac
+      ;;
+    *)
+      session=
+      pos="$key"
+      ;;
+  esac
+
+  case "$pos" in
+    ''|.*|*.|*..*|*[!0-9.]*) return 1 ;;
+  esac
+
+  local _ifs="$IFS"
+  IFS=.
+  set -- $pos
+  IFS="$_ifs"
+  count=$#
+  [ "$count" -ge 1 ] && [ "$count" -le 3 ] || return 1
+
+  local c1="$1" c2="${2:-}" c3="${3:-}"
+  for part in "$c1" "$c2" "$c3"; do
+    [ -n "$part" ] || continue
+    [ "$part" -ge 1 ] 2>/dev/null || return 1
+  done
+
+  printf '%s|%s|%s|%s\n' "$session" "$c1" "$c2" "$c3"
+}
+
+
+# Expand a user key to the key used in $CDD_FILE.
+# Herdr position keys are resolved against the live session here.
+_cdd_expand_key() {
+  local key="$1" parts session c1 c2 c3
+
+  if [ "$CDD_BACKEND" != herdr ]; then
+    echo "$key"
+    return 0
+  fi
+
+  case "$key" in
+    herdr/*)
+      echo "$key"
+      return 0
+      ;;
+    w[0-9A-Z]*:p[0-9A-Z]*|w[0-9A-Z]*.p[0-9A-Z]*|p[0-9A-Z]*)
+      echo "$key"
+      return 0
+      ;;
+  esac
+
+  if parts="$(_cdd_herdr_position_parts "$key")"; then
+    IFS='|' read -r session c1 c2 c3 <<<"$parts"
+    if [ -z "$session" ] && [ -z "$CDD_SESSION" ]; then
+      echo "cdd: $key: not inside a herdr pane" >&2
+      return 1
+    fi
+    if _cdd_herdr_resolve_position "$session" "$c1" "$c2" "$c3"; then
+      return 0
+    fi
+    # Session-qualified keys may also be literal keys (for example tmux).
+    if [ -n "$session" ] && [ -f "$CDD_FILE" ] && \
+       _cdd_lookup "$key" >/dev/null 2>&1; then
+      echo "$key"
+      return 0
+    fi
+    echo "cdd: $key: $_cdd_resolve_error" >&2
+    return 1
+  fi
+
+  echo "$key"
+}
+
+
 _cdd_cd() {
   if [ ! -f "$CDD_FILE" ]; then
     echo "cdd: $CDD_FILE: No such file" >&2
     return 2
   fi
 
-  local key="$(_cdd_canonicalize_key "$1")"
+  local key
+  if ! key="$(_cdd_expand_key "$1")"; then
+    return 3
+  fi
+  key="$(_cdd_canonicalize_key "$key")"
 
   local dir
   if dir="$(_cdd_lookup "$key")" && [ -n "$dir" ]; then
@@ -228,14 +492,18 @@ _cdd_add() {
   local dir="$2"
 
   # "cdd add <key>:<directory>" is supported when <directory> is omitted.
-  # Herdr pane IDs contain ':' (e.g. w1:p2), so keep them intact.
+  # Herdr pane IDs contain ':' (e.g. w4:p2), so keep them intact.
   if [ -z "$dir" ] && [ -n "$key" ]; then
     case "$key" in
-      w[0-9]*:p[0-9]*) ;;
+      herdr/*) ;;
+      w[0-9A-Z]*:p[0-9A-Z]*|w[0-9A-Z]*.p[0-9A-Z]*) ;;
       *:*) dir="${key#*:}"; key="${key%%:*}" ;;
     esac
   fi
 
+  if ! key="$(_cdd_expand_key "$key")"; then
+    return 3
+  fi
   key="$(_cdd_canonicalize_key "$key")"
 
   local _dir result
@@ -263,7 +531,11 @@ _cdd_delete() {
     return 2
   fi
 
-  local key="$(_cdd_canonicalize_key "$1")"
+  local key
+  if ! key="$(_cdd_expand_key "$1")"; then
+    return 3
+  fi
+  key="$(_cdd_canonicalize_key "$key")"
 
   if _cdd_lookup "$key" >/dev/null; then
     _cdd_remove_key "$key"
@@ -279,20 +551,34 @@ _cdd_canonicalize_key() {
   local key="$1"
 
   if [ "$CDD_BACKEND" = herdr ]; then
-    # Accept Herdr pane IDs and pane-only forms in the current workspace.
+    local ws pane ws_num pane_num
     case "$key" in
-      w[0-9]*:p[0-9]*)
-        key="${key#w}"
-        key="${key%%:*}.${key##*:p}"
+      w[0-9A-Z]*:p[0-9A-Z]*|w[0-9A-Z]*.p[0-9A-Z]*)
+        case "$key" in
+          *:*)
+            ws="${key#w}"; ws="${ws%%:*}"
+            pane="${key##*:p}"
+            ;;
+          *)
+            ws="${key#w}"; ws="${ws%%.*}"
+            pane="${key##*.p}"
+            ;;
+        esac
+        ws_num="$(_cdd_herdr_decode_number "$ws")"
+        pane_num="$(_cdd_herdr_decode_number "$pane")"
+        if [ -n "$ws_num" ] && [ -n "$pane_num" ]; then
+          key="${CDD_KEY_SCOPE},${ws_num}.${pane_num}"
+        fi
         ;;
-      w[0-9]*.p[0-9]*)
-        key="${key#w}"
-        key="${key%%.*}.${key##*.p}"
-        ;;
-      p[0-9]*)
-        key="${CDD_WINDOW}.${key#p}"
+      p[0-9A-Z]*)
+        pane_num="$(_cdd_herdr_decode_number "${key#p}")"
+        if [ -n "$pane_num" ]; then
+          key="${CDD_KEY_SCOPE},${CDD_WINDOW}.${pane_num}"
+        fi
         ;;
     esac
+    echo "$key"
+    return
   fi
 
   if echo "$key" | grep '^\(.\+,\)\?[0-9]\+\.\?$' >/dev/null; then
@@ -322,6 +608,35 @@ _cdd_register() {
 }
 
 
+# Herdr entries of the current scope are shown as stable pane IDs (w4:p2)
+# so that completion never suggests ambiguous position keys.
+_cdd_comp_herdr_ids() {
+  awk '
+    BEGIN { alphabet = "123456789ABCDEFGHJKMNPQRSTVWXYZ0" }
+    function encode(value,   digit, encoded) {
+      if (value == 0) return "0"
+      encoded = ""
+      while (value > 0) {
+        digit = (value - 1) % 32
+        encoded = substr(alphabet, digit + 1, 1) encoded
+        value = int((value - 1) / 32)
+      }
+      return encoded
+    }
+    {
+      if (match($0, /^[0-9]+\.[0-9]+:/)) {
+        head = substr($0, 1, RLENGTH - 1)
+        rest = substr($0, RLENGTH + 1)
+        dot = index(head, ".")
+        print "w" encode(substr(head, 1, dot - 1)) ":p" encode(substr(head, dot + 1)) ":" rest
+      } else {
+        print
+      }
+    }
+  '
+}
+
+
 _cdd_comp() {
   local mode="$1"
   local -i CURRENT="$2"
@@ -336,7 +651,13 @@ _cdd_comp() {
     done < "$CDD_FILE")"
     _cdd_descr='cdd directory'
 
-    if [ "$mode" = zsh ]; then
+    if [ "$CDD_BACKEND" = herdr ]; then
+      _cdd_opts="$(printf '%s\n' "$_cdd_opts" | _cdd_comp_herdr_ids)"
+      if [ "$mode" = zsh ]; then
+        _cdd_opts="$(printf '%s\n' "$_cdd_opts" | \
+          sed 's/^\(w[0-9A-Z]*\):\(p[0-9A-Z]*\):/\1\\:\2:/')"
+      fi
+    elif [ "$mode" = zsh ]; then
       _cdd_opts="$(echo "$_cdd_opts" | sed "s;\\.${CDD_DEFAULT_PANE}:;:;")"
     fi
 

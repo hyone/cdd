@@ -26,7 +26,7 @@ check() {
 # Run without multiplexer variables inherited from the caller.
 clean_env() {
   env -u HERDR_ENV -u HERDR_SESSION -u HERDR_WORKSPACE_ID -u HERDR_PANE_ID \
-      -u HERDR_TAB_ID -u HERDR_SOCKET_PATH -u HERDR_BIN_PATH \
+      -u HERDR_TAB_ID -u HERDR_SOCKET_PATH -u HERDR_BIN_PATH -u HERDR_FIX \
       -u TMUX -u TMUX_PANE -u STY -u WINDOW -u CDD_MULTIPLEXER "$@"
 }
 
@@ -40,11 +40,13 @@ expect_dir() {
 }
 
 # Run a bash snippet in a herdr pane context. The snippet receives the cdd
-# path as $1 and the remaining arguments after that.
+# path as $1 and the remaining arguments after that. Candidate pane IDs are
+# supplied by the fake herdr below.
 run_herdr() {
   local file="$1" snippet="$2"
   shift 2
-  clean_env CDD_FILE="$file" TERM_PROGRAM=herdr HERDR_ENV=1 \
+  clean_env PATH="$TMP/bin:$PATH" HERDR_FIX="$TMP/herdr" \
+    CDD_FILE="$file" TERM_PROGRAM=herdr HERDR_ENV=1 \
     HERDR_SESSION=main HERDR_WORKSPACE_ID=w1 HERDR_PANE_ID=w1:p2 \
     bash -c "$snippet" _ "$CDD" "$@"
 }
@@ -57,17 +59,54 @@ run_tmux() {
     TMUX="$TMP/fake-tmux" bash -c "$snippet" _ "$CDD" "$@"
 }
 
-mkdir -p "$TMP/bin"
+mkdir -p "$TMP/bin" "$TMP/herdr"
+
 printf '#!/bin/sh\necho main,1.0\n' >"$TMP/bin/tmux"
 chmod +x "$TMP/bin/tmux"
+
+# Fake "herdr pane list". Positions are intentionally different from the
+# stable pane numbers so tests catch ID/position mixups.
+cat >"$TMP/herdr/current.json" <<'__EOT__'
+{"id":"cli:pane:list","result":{"panes":[
+{"cwd":"/tmp/a","focused":false,"pane_id":"w1:p2","tab_id":"w1:t1","workspace_id":"w1"},
+{"cwd":"/tmp/b","focused":true,"pane_id":"w1:p5","tab_id":"w1:t1","workspace_id":"w1"},
+{"cwd":"/tmp/c","focused":false,"pane_id":"w1:pA","tab_id":"w1:t2","workspace_id":"w1"},
+{"cwd":"/tmp/d","focused":false,"pane_id":"w9:p3","tab_id":"w9:t1","workspace_id":"w9"}
+],"type":"pane_list"}}
+__EOT__
+
+cat >"$TMP/herdr/sub.json" <<'__EOT__'
+{"id":"cli:pane:list","result":{"panes":[
+{"cwd":"/tmp/s","focused":false,"pane_id":"w4:p4","tab_id":"w4:t4","workspace_id":"w4"},
+{"cwd":"/tmp/t","focused":true,"pane_id":"w4:p5","tab_id":"w4:t5","workspace_id":"w4"}
+],"type":"pane_list"}}
+__EOT__
+
+cat >"$TMP/bin/herdr" <<'__EOT__'
+#!/bin/sh
+case "$*" in
+  "pane list") cat "$HERDR_FIX/current.json" ;;
+  "--session sub pane list") cat "$HERDR_FIX/sub.json" ;;
+  "--session down pane list")
+    echo '{"id":"cli:pane:list","error":{"code":"server_not_running","message":"no herdr server is running"}}'
+    ;;
+  *)
+    echo "herdr stub: unexpected arguments: $*" >&2
+    exit 1
+    ;;
+esac
+__EOT__
+chmod +x "$TMP/bin/herdr"
 
 dir1="$TMP/dir one"
 dir2="$TMP/dir two"
 dir3="$TMP/dir:three"
 dir4="$TMP/plain"
-mkdir -p "$dir1" "$dir2" "$dir3" "$dir4"
+dir5="$TMP/dir five"
+dir6="$TMP/dir six"
+mkdir -p "$dir1" "$dir2" "$dir3" "$dir4" "$dir5" "$dir6"
 
-# --- herdr -----------------------------------------------------------------
+# --- herdr: detection and stable keys --------------------------------------
 
 out="$(run_herdr "$TMP/t1.cdd" '
   . "$1"
@@ -81,31 +120,142 @@ check "herdr: detection and auto registration" \
 herdr/main,1.2:$(expect_dir "$dir1")
 last:$(expect_dir "$dir1")" "$out"
 
-out="$(clean_env CDD_FILE="$TMP/t2.cdd" TERM_PROGRAM=herdr HERDR_ENV=1 \
-  HERDR_SESSION=sub HERDR_WORKSPACE_ID=w3 HERDR_PANE_ID=w3:p11 \
+out="$(clean_env PATH="$TMP/bin:$PATH" HERDR_FIX="$TMP/herdr" CDD_FILE="$TMP/t2.cdd" \
+  TERM_PROGRAM=herdr HERDR_ENV=1 HERDR_SESSION=main \
+  HERDR_WORKSPACE_ID=wA HERDR_PANE_ID=wA:pF \
+  bash -c '. "$1"; echo "$CDD_KEY"' _ "$CDD")"
+check "herdr: base32 IDs over 9 (wA=10, pF=15)" "herdr/main,10.15" "$out"
+
+out="$(clean_env PATH="$TMP/bin:$PATH" HERDR_FIX="$TMP/herdr" CDD_FILE="$TMP/t3.cdd" \
+  TERM_PROGRAM=herdr HERDR_ENV=1 HERDR_SESSION=sub \
+  HERDR_WORKSPACE_ID=w3 HERDR_PANE_ID=w3:pB \
   bash -c '. "$1"; echo "$CDD_KEY"' _ "$CDD")"
 check "herdr: session and pane namespace" "herdr/sub,3.11" "$out"
 
-out="$(run_herdr "$TMP/t3.cdd" '
+out="$(run_herdr "$TMP/t4.cdd" '
   . "$1"
-  for key in 1 1. 1.2 w1:p2 w1.p2 p2 p11 herdr/main,1.2 last foo; do
+  for key in 1 1. 1.2 w1:p2 w1.p2 p2 pB wA:pF w1:p11 herdr/main,1.2 last foo; do
     printf "%s -> %s\n" "$key" "$(_cdd_canonicalize_key "$key")"
   done')"
-check "herdr: key canonicalization" \
-  "1 -> herdr/main,1.1
-1. -> herdr/main,1.1
-1.2 -> herdr/main,1.2
+check "herdr: stable key canonicalization" \
+  "1 -> 1
+1. -> 1.
+1.2 -> 1.2
 w1:p2 -> herdr/main,1.2
 w1.p2 -> herdr/main,1.2
 p2 -> herdr/main,1.2
-p11 -> herdr/main,1.11
+pB -> herdr/main,1.11
+wA:pF -> herdr/main,10.15
+w1:p11 -> herdr/main,1.33
 herdr/main,1.2 -> herdr/main,1.2
 last -> last
 foo -> foo" "$out"
 
+# --- herdr: position keys --------------------------------------------------
+
+out="$(run_herdr "$TMP/t5.cdd" '
+  . "$1"
+  for key in 1 1.2 2.1 2.1.1 sub,1 sub,2 pA w1:p5; do
+    resolved="$(_cdd_expand_key "$key")" || resolved="ERROR"
+    printf "%s -> %s\n" "$key" "$resolved"
+  done')"
+check "herdr: position key resolution" \
+  "1 -> herdr/main,1.2
+1.2 -> herdr/main,1.5
+2.1 -> herdr/main,1.10
+2.1.1 -> herdr/main,9.3
+sub,1 -> herdr/sub,4.4
+sub,2 -> herdr/sub,4.5
+pA -> pA
+w1:p5 -> w1:p5" "$out"
+
+file="$TMP/t6.cdd"
+{
+  printf 'herdr/main,1.2:%s\n' "$dir1"
+  printf 'herdr/main,1.5:%s\n' "$dir2"
+  printf 'herdr/main,1.10:%s\n' "$dir3"
+  printf 'herdr/main,9.3:%s\n' "$dir4"
+  printf 'herdr/sub,4.5:%s\n' "$dir5"
+  printf 'main,1.0:%s\n' "$dir6"
+} >"$file"
+out="$(run_herdr "$file" '
+  . "$1"
+  cd /
+  cdd 1.2; pwd
+  cdd 1; pwd
+  cdd 2.1; pwd
+  cdd 2.1.1; pwd
+  cdd sub,2; pwd
+  cdd main,1.0; pwd
+  cdd w1:p5; pwd
+  cdd p2; pwd
+' 2>/dev/null)"
+check "herdr: cd by position, stable and literal keys" \
+  "cd $dir2
+$dir2
+cd $dir1
+$dir1
+cd $dir3
+$dir3
+cd $dir4
+$dir4
+cd $dir5
+$dir5
+cd $dir6
+$dir6
+cd $dir2
+$dir2
+cd $dir1
+$dir1" "$out"
+
+out="$(run_herdr "$TMP/t7.cdd" '
+  . "$1"
+  for key in 1.3 3.1.1 sub,3 down,1; do
+    _cdd_expand_key "$key" 2>&1 >/dev/null
+  done')"
+check "herdr: position key errors" \
+  "cdd: 1.3: no pane at tab 1, pane 3
+cdd: 3.1.1: no pane at workspace 3, tab 1, pane 1
+cdd: sub,3: no pane at tab 3, pane 1
+cdd: down,1: herdr session 'down' is not running" "$out"
+
+out="$(run_herdr "$TMP/t7.cdd" '. "$1"; cdd 1.3 >/dev/null 2>&1; echo $?')"
+check "herdr: position error exit status" "3" "$out"
+
+# --- herdr: add / delete ---------------------------------------------------
+
+out="$(run_herdr "$TMP/t8.cdd" '
+  . "$1"
+  cdd add 1.2 "$2"
+  grep "^herdr/main,1.5:" "$CDD_FILE"
+  cdd add w1:pB "$3"
+  grep "^herdr/main,1.11:" "$CDD_FILE"
+  cdd delete 1.2
+  grep -c "^herdr/main,1.5:" "$CDD_FILE" || true
+  cdd delete w1:pB
+  grep -c "^herdr/main,1.11:" "$CDD_FILE" || true
+' "$dir1" "$dir2")"
+check "herdr: add/delete with position and stable keys" \
+  "herdr/main,1.5:$(expect_dir "$dir1")
+herdr/main,1.11:$(expect_dir "$dir2")
+0
+0" "$out"
+
+out="$(run_herdr "$TMP/t9.cdd" '
+  . "$1"
+  cdd add w1:p2 "$2"
+  cdd add w1:pB "$3"
+  cdd delete w1:p2
+  grep -c "^herdr/main,1.11:" "$CDD_FILE" || true
+  grep -c "^herdr/main,1.2:" "$CDD_FILE" || true
+' "$dir1" "$dir2")"
+check "herdr: key removal matches exactly" \
+  "1
+0" "$out"
+
 # --- tmux ------------------------------------------------------------------
 
-out="$(run_tmux "$TMP/t4.cdd" '
+out="$(run_tmux "$TMP/t10.cdd" '
   . "$1"
   echo "$CDD_BACKEND|$CDD_SESSION|$CDD_WINDOW|$CDD_PANE|$CDD_KEY"
   printf "%s -> %s\n" 1 "$(_cdd_canonicalize_key 1)"
@@ -113,23 +263,23 @@ out="$(run_tmux "$TMP/t4.cdd" '
   cd "$2" || exit 1
   _cdd_chpwd
   cat "$CDD_FILE"
-' "$dir2")"
+' "$dir1")"
 check "tmux: regression" \
   "tmux|main|1|0|main,1.0
 1 -> main,1.0
 1.2 -> main,1.2
-main,1.0:$(expect_dir "$dir2")
-last:$(expect_dir "$dir2")" "$out"
+main,1.0:$(expect_dir "$dir1")
+last:$(expect_dir "$dir1")" "$out"
 
 # --- nested multiplexers ---------------------------------------------------
 
-out="$(clean_env PATH="$TMP/bin:$PATH" CDD_FILE="$TMP/t5.cdd" \
+out="$(clean_env PATH="$TMP/bin:$PATH" CDD_FILE="$TMP/t11.cdd" \
   TERM_PROGRAM=herdr HERDR_ENV=1 TMUX="$TMP/fake-tmux" \
   HERDR_SESSION=main HERDR_WORKSPACE_ID=w1 HERDR_PANE_ID=w1:p2 \
   bash -c '. "$1"; echo "$CDD_BACKEND"' _ "$CDD")"
 check "nesting: herdr inside tmux" "herdr" "$out"
 
-out="$(clean_env PATH="$TMP/bin:$PATH" CDD_FILE="$TMP/t5.cdd" \
+out="$(clean_env PATH="$TMP/bin:$PATH" CDD_FILE="$TMP/t11.cdd" \
   TERM_PROGRAM=tmux TMUX="$TMP/fake-tmux" HERDR_ENV=1 \
   HERDR_SESSION=main HERDR_WORKSPACE_ID=w1 HERDR_PANE_ID=w1:p2 \
   bash -c '. "$1"; echo "$CDD_BACKEND"' _ "$CDD")"
@@ -137,7 +287,7 @@ check "nesting: tmux inside herdr" "tmux" "$out"
 
 # --- CDD_MULTIPLEXER -------------------------------------------------------
 
-out="$(clean_env CDD_FILE="$TMP/t6.cdd" CDD_MULTIPLEXER=none TERM_PROGRAM=herdr \
+out="$(clean_env CDD_FILE="$TMP/t12.cdd" CDD_MULTIPLEXER=none TERM_PROGRAM=herdr \
   HERDR_ENV=1 HERDR_SESSION=main HERDR_WORKSPACE_ID=w1 HERDR_PANE_ID=w1:p2 \
   bash -c '. "$1"; echo "[$CDD_KEY]"; cd "$2" || exit 1; _cdd_chpwd; cat "$CDD_FILE"' \
   _ "$CDD" "$dir1")"
@@ -145,53 +295,14 @@ check "CDD_MULTIPLEXER=none: only last is registered" \
   "[]
 last:$(expect_dir "$dir1")" "$out"
 
-out="$(clean_env CDD_FILE="$TMP/t7.cdd" CDD_MULTIPLEXER=herdr TERM_PROGRAM=xterm \
+out="$(clean_env CDD_FILE="$TMP/t13.cdd" CDD_MULTIPLEXER=herdr TERM_PROGRAM=xterm \
   HERDR_ENV=1 HERDR_SESSION=dev HERDR_WORKSPACE_ID=w2 HERDR_PANE_ID=w2:p5 \
   bash -c '. "$1"; echo "$CDD_BACKEND|$CDD_KEY"' _ "$CDD")"
 check "CDD_MULTIPLEXER=herdr: override" "herdr|herdr/dev,2.5" "$out"
 
-# --- add / delete / cd -----------------------------------------------------
-
-out="$(run_herdr "$TMP/t8.cdd" '
-  . "$1"
-  cdd add 1.2 "$2"
-  cdd add w1:p3 "$3"
-  echo "--- file ---"
-  cat "$CDD_FILE"
-  cd /
-  cdd 1.2
-  pwd
-  cdd 1.3
-  pwd
-  cdd delete 1.2
-  cdd 1.2
-  echo "rc=$?"
-' "$dir1" "$dir3" 2>/dev/null)"
-check "herdr: add/delete/cd" \
-  "--- file ---
-herdr/main,1.2:$(expect_dir "$dir1")
-herdr/main,1.3:$(expect_dir "$dir3")
-cd $(expect_dir "$dir1")
-$dir1
-cd $(expect_dir "$dir3")
-$dir3
-rc=3" "$out"
-
-out="$(run_herdr "$TMP/t9.cdd" '
-  . "$1"
-  cdd add 1.2 "$2"
-  cdd add 1.20 "$3"
-  cdd delete 1.2
-  grep -c "^herdr/main,1.20:" "$CDD_FILE" || true
-  grep -c "^herdr/main,1.2:" "$CDD_FILE" || true
-' "$dir1" "$dir2")"
-check "herdr: key removal matches exactly" \
-  "1
-0" "$out"
-
 # --- shared CDD_FILE -------------------------------------------------------
 
-file="$TMP/t10.cdd"
+file="$TMP/t14.cdd"
 run_tmux "$file" '. "$1"; cd "$2" || exit 1; _cdd_chpwd' "$dir1" >/dev/null
 run_herdr "$file" '. "$1"; cd "$2" || exit 1; _cdd_chpwd' "$dir2" >/dev/null
 
@@ -201,14 +312,14 @@ check "tmux and herdr keys coexist in one file" \
 1" "$out"
 
 out="$(run_herdr "$file" '. "$1"; cd /; cdd main,1.0; pwd' 2>/dev/null)"
-check "cross-backend lookup with an explicit key" \
+check "cross-backend lookup with a literal key" \
   "cd $(expect_dir "$dir1")
 $dir1" "$out"
 
 # --- zsh -------------------------------------------------------------------
 
 if command -v zsh >/dev/null 2>&1; then
-  out="$(clean_env CDD_FILE="$TMP/t11.cdd" TERM_PROGRAM=herdr HERDR_ENV=1 \
+  out="$(clean_env CDD_FILE="$TMP/t15.cdd" TERM_PROGRAM=herdr HERDR_ENV=1 \
     HERDR_SESSION=main HERDR_WORKSPACE_ID=w1 HERDR_PANE_ID=w1:p2 \
     zsh -f -c 'autoload -U compinit; compinit -i 2>/dev/null; source "$1"; cd "$2" || exit 1; print -r -- "$CDD_KEY"; cat "$CDD_FILE"' \
     _ "$ROOT/cdd.plugin.zsh" "$dir1" 2>/dev/null)"
@@ -217,21 +328,23 @@ if command -v zsh >/dev/null 2>&1; then
 herdr/main,1.2:$(expect_dir "$dir1")
 last:$(expect_dir "$dir1")" "$out"
 
-  file="$TMP/t11b.cdd"
-  printf 'herdr/main,1.1:%s\nherdr/main,1.2:%s\nmain,1.0:%s\nlast:%s\n' \
-    "$dir1" "$dir2" "$dir3" "$dir1" >"$file"
+  file="$TMP/t15b.cdd"
+  printf 'herdr/main,1.1:%s\nherdr/main,1.2:%s\nmain,1.0:%s\nmain,1.1:%s\nlast:%s\nherdr/sub,4.4:%s\n' \
+    "$dir1" "$dir2" "$dir3" "$dir5" "$dir1" "$dir4" >"$file"
   out="$(clean_env CDD_FILE="$file" TERM_PROGRAM=herdr HERDR_ENV=1 \
     HERDR_SESSION=main HERDR_WORKSPACE_ID=w1 HERDR_PANE_ID=w1:p2 \
     zsh -f -c 'autoload -U compinit; compinit -i 2>/dev/null; source "$1"; _cdd_comp zsh 2 cdd; print -r -- "$_cdd_opts"' \
     _ "$CDD" 2>/dev/null)"
-  check "zsh completion: scope and default pane" \
-    "1:$(expect_dir "$dir1")
-1.2:$(expect_dir "$dir2")
-main,1.0:$(expect_dir "$dir3")
-last:$(expect_dir "$dir1")" "$out"
+  check "zsh completion: stable IDs, scope and default pane" \
+    'w1\:p1:'"$dir1"'
+w1\:p2:'"$dir2"'
+main,1.0:'"$dir3"'
+main,1.1:'"$dir5"'
+last:'"$dir1"'
+herdr/sub,4.4:'"$dir4" "$out"
 
   # Regression: zsh's noclobber option broke key replacement.
-  file="$TMP/t11c.cdd"
+  file="$TMP/t15c.cdd"
   out="$(clean_env CDD_FILE="$file" TERM_PROGRAM=herdr HERDR_ENV=1 \
     HERDR_SESSION=main HERDR_WORKSPACE_ID=w1 HERDR_PANE_ID=w1:p2 \
     zsh -f -o noclobber -c '
@@ -247,7 +360,7 @@ last:$(expect_dir "$dir1")" "$out"
 last:$(expect_dir "$dir4")" "$out"
 
   # Regression: sourcing the plugin twice must not register the hook twice.
-  out="$(clean_env CDD_FILE="$TMP/t11d.cdd" TERM_PROGRAM=herdr HERDR_ENV=1 \
+  out="$(clean_env CDD_FILE="$TMP/t15d.cdd" TERM_PROGRAM=herdr HERDR_ENV=1 \
     HERDR_SESSION=main HERDR_WORKSPACE_ID=w1 HERDR_PANE_ID=w1:p2 \
     zsh -f -c '
       autoload -U compinit; compinit -i 2>/dev/null
@@ -262,8 +375,9 @@ fi
 
 # --- bash completion -------------------------------------------------------
 
-file="$TMP/t12.cdd"
+file="$TMP/t16.cdd"
 printf 'herdr/main,1.2:%s\nlast:%s\n' "$dir4" "$dir1" >"$file"
+expected_bash="w1:p2:$(expect_dir "$dir4")"
 out="$(run_herdr "$file" '
   . "$1"
   COMP_WORDS=(cdd "")
@@ -272,16 +386,16 @@ out="$(run_herdr "$file" '
   printf "%s\n" "${COMPREPLY[@]}"
 ')"
 case "$out" in
-  *"1.2:$(expect_dir "$dir4")"*)
-    check "bash completion: herdr key candidate" ok ok
+  *"$expected_bash"*)
+    check "bash completion: stable herdr ID candidate" ok ok
     ;;
   *)
-    check "bash completion: herdr key candidate" "contains 1.2:$(expect_dir "$dir4")" "$out"
+    check "bash completion: stable herdr ID candidate" "contains $expected_bash" "$out"
     ;;
 esac
 
 # Regression: bash's noclobber option must not break key replacement.
-out="$(run_herdr "$TMP/t12b.cdd" '
+out="$(run_herdr "$TMP/t16b.cdd" '
   set -o noclobber
   . "$1"
   cd "$2" || exit 1
