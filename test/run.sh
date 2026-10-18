@@ -416,6 +416,54 @@ out="$(run_herdr "$file" '. "$1"; cdd list')"
 check "cdd list: unreadable session falls back to stored key" \
   "  herdr/broken,w1.p1: $(expect_dir "$dir1")" "$out"
 
+# --- cdd list edge cases ---------------------------------------------------
+
+dir_tab="$TMP/dd$(printf '\t')t"
+mkdir -p "$dir_tab"
+out="$(run_herdr "$TMP/t18.cdd" '
+  . "$1"
+  cdd add w1:p2 "$2"
+  cdd add last "$2"
+  cdd list
+' "$dir_tab")"
+check "cdd list: directories containing tabs" \
+  "* main,1.1.1 (w1:p2): $dir_tab
+  last: $dir_tab" "$out"
+
+file="$TMP/t19.cdd"
+printf 'herdr/a\\b,w1.p2:%s\n' "$dir1" >"$file"
+out="$(clean_env PATH="$TMP/bin:$PATH" HERDR_FIX="$TMP/herdr" CDD_FILE="$file" \
+  TERM_PROGRAM=herdr HERDR_ENV=1 HERDR_SESSION='a\b' \
+  HERDR_WORKSPACE_ID=w1 HERDR_PANE_ID=w1:p2 \
+  bash -c '. "$1"; cdd list; cdd "herdr/a\\b,w1.p2"; pwd; cdd delete "herdr/a\\b,w1.p2"; wc -l < "$CDD_FILE"' \
+  _ "$CDD" 2>/dev/null)"
+check "herdr: keys containing backslashes" \
+  "* a\\b,1.1.1 (w1:p2): $(expect_dir "$dir1")
+cd $(expect_dir "$dir1")
+$dir1
+0" "$out"
+
+file="$TMP/t20.cdd"
+out="$(run_herdr "$file" '
+  . "$1"
+  cdd add "REC W 1 1 1 w1 p2" "$2"
+  cdd add last "$2"
+  cdd list
+  cd /; cdd "REC W 1 1 1 w1 p2"; pwd
+' "$dir1" 2>/dev/null)"
+check "cdd list: keys starting with REC" \
+  "  REC W 1 1 1 w1 p2: $(expect_dir "$dir1")
+  last: $(expect_dir "$dir1")
+cd $(expect_dir "$dir1")
+$dir1" "$out"
+
+file="$TMP/t21.cdd"
+printf 'main,1.0:%s\n\nlast:%s\n' "$dir1" "$dir1" >"$file"
+out="$(run_herdr "$file" '. "$1"; cdd list')"
+check "cdd list: skips empty lines" \
+  "  main,1.0: $(expect_dir "$dir1")
+  last: $(expect_dir "$dir1")" "$out"
+
 # --- zsh -------------------------------------------------------------------
 
 if command -v zsh >/dev/null 2>&1; then
@@ -467,6 +515,15 @@ sub,2 -> herdr/sub,w4.p5" "$out"
   check "zsh: cd by position key" \
     "cd $(expect_dir "$dir2")
 $dir2" "$out"
+
+  file="$TMP/t15g.cdd"
+  printf 'herdr/main,w1.p2:%s\nlast:%s\n' "$dir1" "$dir1" >"$file"
+  out="$(clean_env PATH="$TMP/bin:$PATH" HERDR_FIX="$TMP/herdr" CDD_FILE="$file" \
+    TERM_PROGRAM=herdr HERDR_ENV=1 HERDR_SESSION=main HERDR_WORKSPACE_ID=w1 HERDR_PANE_ID=w1:p2 \
+    zsh -f -c 'source "$1"; cdd list' _ "$CDD" 2>/dev/null)"
+  check "zsh: cdd list output" \
+    "* main,1.1.1 (w1:p2): $(expect_dir "$dir1")
+  last: $(expect_dir "$dir1")" "$out"
 
   # Regression: zsh's noclobber option broke key replacement.
   file="$TMP/t15c.cdd"

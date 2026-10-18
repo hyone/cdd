@@ -182,8 +182,11 @@ __EOT__
 
 
 # Print the directory registered for the exact key ($1).
+# The key is passed through the environment because awk -v would
+# interpret backslash escapes in it.
 _cdd_lookup() {
-  awk -F: -v key="$1" '
+  CDD_LOOKUP_KEY="$1" awk -F: '
+    BEGIN { key = ENVIRON["CDD_LOOKUP_KEY"] }
     $1 == key {
       sub(/^[^:]*:/, "")
       print
@@ -199,7 +202,10 @@ _cdd_lookup() {
 # Use >| so the replacement also works with zsh's noclobber option.
 _cdd_remove_key() {
   local tmp="$CDD_FILE.tmp.$$"
-  if awk -F: -v key="$1" '$1 != key' "$CDD_FILE" >|"$tmp"; then
+  if CDD_LOOKUP_KEY="$1" awk -F: '
+      BEGIN { key = ENVIRON["CDD_LOOKUP_KEY"] }
+      $1 != key
+    ' "$CDD_FILE" >|"$tmp"; then
     cat "$tmp" >|"$CDD_FILE"
   fi
   rm -f "$tmp"
@@ -313,49 +319,50 @@ _cdd_list() {
       fi
       printf '%s\n' "$parsed" | \
         while IFS= read -r _cdd_record; do
-          [ -n "$_cdd_record" ] && printf 'REC %s %s\n' "$session" "$_cdd_record"
+          [ -n "$_cdd_record" ] && printf '%s %s\n' "$session" "$_cdd_record"
         done
     done
     printf 'FILE\n'
     cat "$CDD_FILE"
   } | awk '
-    $1 == "REC" {
-      session = $2
-      if ($3 == "A") {
-        active[session] = $4
-      } else if ($3 == "W") {
-        positions[session "|" $7 "." $8] = $4 " " $5 " " $6
-        if (!(session "|" $7 in ws_seen)) {
-          ws_seen[session "|" $7] = 1
+    $0 == "FILE" { in_file = 1; next }
+    !in_file {
+      session = $1
+      if ($2 == "A") {
+        active[session] = $3
+      } else if ($2 == "W") {
+        positions[session "|" $6 "." $7] = $3 " " $4 " " $5
+        if (!(session "|" $6 in ws_seen)) {
+          ws_seen[session "|" $6] = 1
           ws_count[session]++
         }
       }
       next
     }
-    $0 == "FILE" { next }
     {
+      if ($0 == "") next
       colon = index($0, ":")
-      if (colon == 0) { print $0 "\t"; next }
+      if (colon == 0) { print $0 "\034"; next }
       key = substr($0, 1, colon - 1)
       dir = substr($0, colon + 1)
 
       if (substr(key, 1, 6) != "herdr/") {
-        print key ": " dir "\t" key
+        print key ": " dir "\034" key
         next
       }
       rest = substr(key, 7)
       comma = index(rest, ",")
-      if (comma == 0) { print key ": " dir "\t" key; next }
+      if (comma == 0) { print key ": " dir "\034" key; next }
       session = substr(rest, 1, comma - 1)
       ws_pane = substr(rest, comma + 1)
       dot = index(ws_pane, ".")
-      if (dot == 0) { print key ": " dir "\t" key; next }
+      if (dot == 0) { print key ": " dir "\034" key; next }
       ws = substr(ws_pane, 1, dot - 1)
       pane = substr(ws_pane, dot + 1)
 
       lookup = session "|" ws "." pane
       if (!(lookup in positions) || !(session in active)) {
-        print key ": " dir "\t" key
+        print key ": " dir "\034" key
         next
       }
 
@@ -369,9 +376,13 @@ _cdd_list() {
       } else {
         form = ws_pos "." tab_pos "." pane_pos
       }
-      print prefix form " (" id "): " dir "\t" key
+      print prefix form " (" id "): " dir "\034" key
     }
-  ' | sort | awk -v current="${CDD_KEY:-}" -F '\t' '
+  ' | sort | CDD_CURRENT_KEY="${CDD_KEY:-}" awk '
+    BEGIN {
+      FS = "\034"
+      current = ENVIRON["CDD_CURRENT_KEY"]
+    }
     $2 == "last" { lastline = $1; next }
     {
       mark = ($2 != "" && $2 == current) ? "* " : "  "
