@@ -39,8 +39,9 @@ so stored keys never look like the numeric position keys; `cdd w4:p2` and
 
 `cdd list` (and `cdd help`) shows each entry with its position key and stable
 pane ID, for example `sub,1 (w4:p4): ~/work/cdd`.  The session name is always
-shown, including the current session, and `last` is listed at the end.  When a
-session has more than one workspace, entries use the explicit
+shown, including the current session, and `last` is listed at the end.  The
+entry of the current pane is marked with `*`.  When a session has more than
+one workspace, entries use the explicit
 `<session>,<workspace>.<tab>.<pane>` form (`sub,2.1.1 (w5:p1)`) so the
 workspace position is always visible.  Entries of a session that is not
 running are shown in the stored `herdr/<session>,...` form.

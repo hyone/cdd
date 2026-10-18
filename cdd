@@ -335,27 +335,27 @@ _cdd_list() {
     $0 == "FILE" { next }
     {
       colon = index($0, ":")
-      if (colon == 0) { print; next }
+      if (colon == 0) { print $0 "\t"; next }
       key = substr($0, 1, colon - 1)
       dir = substr($0, colon + 1)
 
       if (substr(key, 1, 6) != "herdr/") {
-        print key ": " dir
+        print key ": " dir "\t" key
         next
       }
       rest = substr(key, 7)
       comma = index(rest, ",")
-      if (comma == 0) { print key ": " dir; next }
+      if (comma == 0) { print key ": " dir "\t" key; next }
       session = substr(rest, 1, comma - 1)
       ws_pane = substr(rest, comma + 1)
       dot = index(ws_pane, ".")
-      if (dot == 0) { print key ": " dir; next }
+      if (dot == 0) { print key ": " dir "\t" key; next }
       ws = substr(ws_pane, 1, dot - 1)
       pane = substr(ws_pane, dot + 1)
 
       lookup = session "|" ws "." pane
       if (!(lookup in positions) || !(session in active)) {
-        print key ": " dir
+        print key ": " dir "\t" key
         next
       }
 
@@ -369,12 +369,15 @@ _cdd_list() {
       } else {
         form = ws_pos "." tab_pos "." pane_pos
       }
-      print prefix form " (" id "): " dir
+      print prefix form " (" id "): " dir "\t" key
     }
-  ' | sort | awk '
-    /^last:/ { last = $0; next }
-    { print }
-    END { if (last != "") print last }
+  ' | sort | awk -v current="${CDD_KEY:-}" -F '\t' '
+    $2 == "last" { lastline = $1; next }
+    {
+      mark = ($2 != "" && $2 == current) ? "* " : "  "
+      print mark $1
+    }
+    END { if (lastline != "") print "  " lastline }
   '
 }
 

@@ -391,14 +391,14 @@ file="$TMP/t17.cdd"
 
 out="$(run_herdr "$file" '. "$1"; cdd list')"
 check "cdd list: position keys with stable pane IDs" \
-  "herdr/down,w1.p1: $(expect_dir "$dir5")
-main,1.0: $(expect_dir "$dir6")
-main,1.1.1 (w1:p2): $(expect_dir "$dir1")
-main,1.1.2 (w1:p5): $(expect_dir "$dir2")
-main,1.2.1 (w1:pA): $(expect_dir "$dir3")
-main,2.1.1 (w9:p3): $(expect_dir "$dir4")
-sub,2 (w4:p5): $(expect_dir "$dir5")
-last: $(expect_dir "$dir1")" "$out"
+  "  herdr/down,w1.p1: $(expect_dir "$dir5")
+  main,1.0: $(expect_dir "$dir6")
+* main,1.1.1 (w1:p2): $(expect_dir "$dir1")
+  main,1.1.2 (w1:p5): $(expect_dir "$dir2")
+  main,1.2.1 (w1:pA): $(expect_dir "$dir3")
+  main,2.1.1 (w9:p3): $(expect_dir "$dir4")
+  sub,2 (w4:p5): $(expect_dir "$dir5")
+  last: $(expect_dir "$dir1")" "$out"
 
 out="$(run_herdr "$file" '. "$1"; cdd help' 2>&1)"
 case "$out" in
@@ -414,7 +414,7 @@ file="$TMP/t17b.cdd"
 printf 'herdr/broken,w1.p1:%s\n' "$dir1" >"$file"
 out="$(run_herdr "$file" '. "$1"; cdd list')"
 check "cdd list: unreadable session falls back to stored key" \
-  "herdr/broken,w1.p1: $(expect_dir "$dir1")" "$out"
+  "  herdr/broken,w1.p1: $(expect_dir "$dir1")" "$out"
 
 # --- zsh -------------------------------------------------------------------
 
