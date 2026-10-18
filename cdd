@@ -7,7 +7,7 @@ fi
 export CDD_FILE
 
 if [ ! -e "$CDD_FILE" ]; then
-  touch $CDD_FILE
+  touch "$CDD_FILE"
 fi
 
 if [ -z "$CDD_AUTO" ]; then
@@ -15,34 +15,90 @@ if [ -z "$CDD_AUTO" ]; then
 fi
 export CDD_AUTO
 
+
+CDD_BACKEND=
 CDD_SESSION=
 CDD_WINDOW=
 CDD_PANE=
+CDD_DEFAULT_PANE=0
+CDD_KEY_PREFIX=
+CDD_KEY_SCOPE=
+CDD_KEY=
 
-if [ -n "$TMUX" ]; then
-  _cdd_key="$(tmux display -p '#S,#I.#P')"
-  _cdd_window_pane="${_cdd_key##*,}"
-  CDD_SESSION="${_cdd_key%,*}"
-  CDD_WINDOW="${_cdd_window_pane%%.*}"
-  CDD_PANE="${_cdd_window_pane#*.}"
-  if [[ $CDD_SESSION != *[^0-9]* ]]; then
-    CDD_SESSION=_
-  fi
-  unset _cdd_key _cdd_window_pane
+# CDD_MULTIPLEXER forces the backend: tmux, screen, herdr, none or auto.
+# When no multiplexer manages this shell, only "last" is registered.
+#
+# $TERM_PROGRAM identifies the innermost multiplexer so that nested
+# tmux/herdr setups record the pane that actually spawned this shell.
+case "${CDD_MULTIPLEXER:-auto}" in
+  auto)
+    case "${TERM_PROGRAM:-}" in
+      herdr) [ "${HERDR_ENV:-}" = 1 ] && CDD_BACKEND=herdr ;;
+      tmux) [ -n "$TMUX" ] && CDD_BACKEND=tmux ;;
+    esac
+    if [ -z "$CDD_BACKEND" ]; then
+      if [ -n "$TMUX" ]; then
+        CDD_BACKEND=tmux
+      elif [ -n "$STY" ]; then
+        CDD_BACKEND=screen
+      elif [ "${HERDR_ENV:-}" = 1 ]; then
+        CDD_BACKEND=herdr
+      fi
+    fi
+    ;;
+  herdr) [ "${HERDR_ENV:-}" = 1 ] && CDD_BACKEND=herdr ;;
+  tmux) [ -n "$TMUX" ] && CDD_BACKEND=tmux ;;
+  screen) [ -n "$STY" ] && CDD_BACKEND=screen ;;
+esac
 
-elif [ -n "$STY" ]; then
-  _cdd_host="$(hostname)"
-  CDD_SESSION="${STY#*.}"
-  if echo "$CDD_SESSION" | grep "^[^.]\+\.${_cdd_host%%.*}$" >/dev/null; then
-    CDD_SESSION=_
-  fi
-  CDD_WINDOW="$WINDOW"
-  CDD_PANE=0
-  unset _cdd_host
+case "$CDD_BACKEND" in
+  tmux)
+    if [ -n "$TMUX" ]; then
+      _cdd_key="$(tmux display -p '#S,#I.#P')"
+      _cdd_window_pane="${_cdd_key##*,}"
+      CDD_SESSION="${_cdd_key%,*}"
+      CDD_WINDOW="${_cdd_window_pane%%.*}"
+      CDD_PANE="${_cdd_window_pane#*.}"
+      if [[ $CDD_SESSION != *[^0-9]* ]]; then
+        CDD_SESSION=_
+      fi
+      unset _cdd_key _cdd_window_pane
+    fi
+    ;;
+
+  screen)
+    if [ -n "$STY" ]; then
+      _cdd_host="$(hostname)"
+      CDD_SESSION="${STY#*.}"
+      if echo "$CDD_SESSION" | grep "^[^.]\+\.${_cdd_host%%.*}$" >/dev/null; then
+        CDD_SESSION=_
+      fi
+      CDD_WINDOW="$WINDOW"
+      CDD_PANE=0
+      unset _cdd_host
+    fi
+    ;;
+
+  herdr)
+    CDD_KEY_PREFIX=herdr/
+    if [ -n "$HERDR_PANE_ID" ]; then
+      CDD_SESSION="${HERDR_SESSION:-_}"
+      # Herdr IDs are kept as opaque tokens so that stored keys never
+      # look like the numeric position keys.
+      CDD_WINDOW="${HERDR_WORKSPACE_ID//[:,]/_}"
+      CDD_PANE="${HERDR_PANE_ID##*:}"
+      CDD_PANE="${CDD_PANE//[:,]/_}"
+    fi
+    ;;
+esac
+
+CDD_SESSION="$(echo "$CDD_SESSION" | sed 's/[:,]/_/g')"
+CDD_KEY_SCOPE="${CDD_KEY_PREFIX}${CDD_SESSION}"
+if [ -n "$CDD_SESSION" ] && [ -n "$CDD_WINDOW" ]; then
+  CDD_KEY="${CDD_KEY_SCOPE},${CDD_WINDOW}.${CDD_PANE}"
 fi
-
-CDD_SESSION="$(echo "$CDD_SESSION" | sed 's/:/_/g')"
 export CDD_SESSION CDD_WINDOW CDD_PANE
+export CDD_BACKEND CDD_DEFAULT_PANE CDD_KEY_PREFIX CDD_KEY_SCOPE CDD_KEY
 
 
 cdd() {
@@ -68,6 +124,12 @@ cdd() {
         return $?
       fi
       ;;
+    list)
+      if [ $# -eq 1 ]; then
+        _cdd_list
+        return
+      fi
+      ;;
     *)
       if [ $# -eq 1 ]; then
         _cdd_cd "$1"
@@ -83,8 +145,8 @@ cdd() {
 _cdd_chpwd() {
   (($CDD_AUTO)) || return
 
-  if [ -n "$CDD_WINDOW" ]; then
-    _cdd_register "$CDD_SESSION,$CDD_WINDOW.$CDD_PANE" "$PWD"
+  if [ -n "$CDD_KEY" ]; then
+    _cdd_register "$CDD_KEY" "$PWD"
   fi
   _cdd_register last "$PWD"
 }
@@ -98,14 +160,392 @@ _cdd_help() {
 Usage:
   cdd [last]                    move to the last directory
   cdd <key>                     move to the <key> directory
+  cdd list                      list the registered directories
   cdd add <key> [directory]     add the directory to $CDD_FILE
   cdd delete <key>              delete the directory from $CDD_FILE
   cdd help|--help|-h            print this help message
 
+Herdr:
+  cdd records each pane as herdr/<session>,<workspace-id>.<pane-id>.
+  Position keys (resolved when cdd runs):
+    cdd 1.2                     tab 1, pane 2 in the current workspace
+    cdd 3.1.2                   workspace 3, tab 1, pane 2 of this session
+    cdd sub,1.2                 tab 1, pane 2 in the active workspace of sub
+    cdd sub,3.1.2               workspace 3, tab 1, pane 2 of session sub
+  Stable keys:
+    cdd w4:p2                   exact pane, as shown by "herdr pane list"
+    cdd p2                      the same pane id in the current workspace
+
 __EOT__
-  if [ -f "$CDD_FILE" ]; then
-    sort "$CDD_FILE" >&2
+  _cdd_list >&2
+}
+
+
+# Print the directory registered for the exact key ($1).
+# The key is passed through the environment because awk -v would
+# interpret backslash escapes in it.
+_cdd_lookup() {
+  CDD_LOOKUP_KEY="$1" awk -F: '
+    BEGIN { key = ENVIRON["CDD_LOOKUP_KEY"] }
+    $1 == key {
+      sub(/^[^:]*:/, "")
+      print
+      found = 1
+      exit
+    }
+    END { exit !found }
+  ' "$CDD_FILE"
+}
+
+
+# Remove the exact key ($1) from $CDD_FILE.
+# Use >| so the replacement also works with zsh's noclobber option.
+_cdd_remove_key() {
+  local tmp="$CDD_FILE.tmp.$$"
+  if CDD_LOOKUP_KEY="$1" awk -F: '
+      BEGIN { key = ENVIRON["CDD_LOOKUP_KEY"] }
+      $1 != key
+    ' "$CDD_FILE" >|"$tmp"; then
+    cat "$tmp" >|"$CDD_FILE"
   fi
+  rm -f "$tmp"
+}
+
+
+# Check that $1 looks like a Herdr ID token ("w" or "p" followed by one
+# or more base32 characters).
+_cdd_herdr_id_ok() {
+  local body
+  case "$1" in
+    w*) body="${1#w}" ;;
+    p*) body="${1#p}" ;;
+    *) return 1 ;;
+  esac
+  case "$body" in
+    ''|*[!0-9A-Z]*) return 1 ;;
+  esac
+  return 0
+}
+
+
+# Count the pane_id fields in a "pane list" response ($1).
+_cdd_herdr_pane_count() {
+  printf '%s' "$1" | grep -o '"pane_id"' | wc -l | tr -d ' '
+}
+
+# Count the W records printed by _cdd_herdr_position_records ($1).
+_cdd_herdr_record_count() {
+  printf '%s\n' "$1" | grep -c '^W '
+}
+
+
+# Print "W <ws_pos> <tab_pos> <pane_pos> <workspace_id> <pane_id>" for each
+# pane of a Herdr "pane list" response, and "A <active_workspace_id>" at the
+# end.  The list is in workspace, tab and layout order, which matches the
+# order shown in the Herdr UI.
+_cdd_herdr_position_records() {
+  printf '%s' "$1" | tr -d '\n\r' | \
+    sed -e 's/},{/}\n{/g' -e 's/}, {/}\n{/g' | awk '
+    function str_field(line, key,   re, value) {
+      re = "\"" key "\": *\"[^\"]*\""
+      if (match(line, re) == 0) return ""
+      value = substr(line, RSTART, RLENGTH)
+      sub(".*: *\"", "", value)
+      sub("\"$", "", value)
+      return value
+    }
+    function bool_field(line, key,   re, value) {
+      re = "\"" key "\": *[a-z]+"
+      if (match(line, re) == 0) return ""
+      value = substr(line, RSTART, RLENGTH)
+      sub(".*: *", "", value)
+      return value
+    }
+    {
+      ws = str_field($0, "workspace_id")
+      tab = str_field($0, "tab_id")
+      pane = str_field($0, "pane_id")
+      focused = bool_field($0, "focused")
+      if (ws == "" || pane == "") next
+
+      if (ws != last_ws) {
+        ws_pos++
+        last_ws = ws
+        tab_pos = 0
+        last_tab = ""
+      }
+      if (tab != last_tab) {
+        tab_pos++
+        last_tab = tab
+        pane_pos = 0
+      }
+      pane_pos++
+
+      pane_id = substr(pane, index(pane, ":") + 1)
+      if (pane_id == "") next
+      if (ws_pos == 1 && first_ws == "") first_ws = ws
+      if (focused == "true") active_ws = ws
+      print "W", ws_pos, tab_pos, pane_pos, ws, pane_id
+    }
+    END {
+      if (active_ws == "") active_ws = first_ws
+      print "A", active_ws
+    }
+  '
+}
+
+
+# Print registered directories.  Herdr entries are shown with the position
+# key and the stable pane ID, for example "sub,1 (w4:p4): ~/work/cdd".
+_cdd_list() {
+  [ -f "$CDD_FILE" ] || return 0
+
+  local sessions session records parsed wcount
+  sessions="$(sed -n 's|^herdr/\([^,]*\),.*|\1|p' "$CDD_FILE" | sort -u)"
+
+  {
+    printf '%s\n' "$sessions" | while IFS= read -r session; do
+      [ -n "$session" ] || continue
+      if [ "$CDD_BACKEND" = herdr ] && [ "$session" = "$CDD_SESSION" ]; then
+        records="$(herdr pane list 2>&1)"
+      else
+        records="$(herdr --session "$session" pane list 2>&1)"
+      fi
+      parsed="$(_cdd_herdr_position_records "$records")"
+      wcount="$(_cdd_herdr_record_count "$parsed")"
+      if [ "$wcount" = 0 ] || \
+         [ "$wcount" != "$(_cdd_herdr_pane_count "$records")" ]; then
+        continue
+      fi
+      printf '%s\n' "$parsed" | \
+        while IFS= read -r _cdd_record; do
+          [ -n "$_cdd_record" ] && printf '%s %s\n' "$session" "$_cdd_record"
+        done
+    done
+    printf 'FILE\n'
+    cat "$CDD_FILE"
+  } | awk '
+    $0 == "FILE" { in_file = 1; next }
+    !in_file {
+      session = $1
+      if ($2 == "A") {
+        active[session] = $3
+      } else if ($2 == "W") {
+        positions[session "|" $6 "." $7] = $3 " " $4 " " $5
+        if (!(session "|" $6 in ws_seen)) {
+          ws_seen[session "|" $6] = 1
+          ws_count[session]++
+        }
+      }
+      next
+    }
+    {
+      if ($0 == "") next
+      colon = index($0, ":")
+      if (colon == 0) { print $0 "\034"; next }
+      key = substr($0, 1, colon - 1)
+      dir = substr($0, colon + 1)
+
+      if (substr(key, 1, 6) != "herdr/") {
+        print key ": " dir "\034" key
+        next
+      }
+      rest = substr(key, 7)
+      comma = index(rest, ",")
+      if (comma == 0) { print key ": " dir "\034" key; next }
+      session = substr(rest, 1, comma - 1)
+      ws_pane = substr(rest, comma + 1)
+      dot = index(ws_pane, ".")
+      if (dot == 0) { print key ": " dir "\034" key; next }
+      ws = substr(ws_pane, 1, dot - 1)
+      pane = substr(ws_pane, dot + 1)
+
+      lookup = session "|" ws "." pane
+      if (!(lookup in positions) || !(session in active)) {
+        print key ": " dir "\034" key
+        next
+      }
+
+      split(positions[lookup], p, " ")
+      ws_pos = p[1]; tab_pos = p[2]; pane_pos = p[3]
+      id = ws ":" pane
+      prefix = session ","
+
+      if ((ws_count[session] + 0) <= 1 && ws == active[session]) {
+        form = (pane_pos + 0 == 1) ? tab_pos : tab_pos "." pane_pos
+      } else {
+        form = ws_pos "." tab_pos "." pane_pos
+      }
+      print prefix form " (" id "): " dir "\034" key
+    }
+  ' | sort | CDD_CURRENT_KEY="${CDD_KEY:-}" awk '
+    BEGIN {
+      FS = "\034"
+      current = ENVIRON["CDD_CURRENT_KEY"]
+    }
+    $2 == "last" { lastline = $1; next }
+    {
+      mark = ($2 != "" && $2 == current) ? "* " : "  "
+      print mark $1
+    }
+    END { if (lastline != "") print "  " lastline }
+  '
+}
+
+
+# Resolve a position key and store it in _cdd_resolved_key.
+# $1: session name (empty for the current session)
+# $2: first position, $3/$4: optional lower positions
+# Returns non-zero and sets _cdd_resolve_error on failure.
+_cdd_herdr_resolve_position() {
+  local session="$1" c1="$2" c2="$3" c3="$4"
+  local raw records active target scope
+
+  _cdd_resolved_key=
+
+  if [ -n "$session" ]; then
+    raw="$(herdr --session "$session" pane list 2>&1)"
+  else
+    raw="$(herdr pane list 2>&1)"
+  fi
+
+  case "$raw" in
+    *server_not_running*)
+      _cdd_resolve_error="herdr session '${session}' is not running"
+      return 1
+      ;;
+    '')
+      _cdd_resolve_error="could not read panes from herdr"
+      return 1
+      ;;
+  esac
+
+  records="$(_cdd_herdr_position_records "$raw")"
+  if [ "$(_cdd_herdr_record_count "$records")" != "$(_cdd_herdr_pane_count "$raw")" ]; then
+    _cdd_resolve_error="could not read panes from herdr"
+    return 1
+  fi
+  active="$(printf '%s\n' "$records" | awk '$1 == "A" { print $2 }')"
+  if [ -z "$active" ]; then
+    _cdd_resolve_error="no panes found in herdr session '${session:-current}'"
+    return 1
+  fi
+
+  if [ -n "$c3" ]; then
+    target="$(printf '%s\n' "$records" | awk \
+      -v ws="$c1" -v tab="$c2" -v pane="$c3" \
+      '$1 == "W" && $2 == ws && $3 == tab && $4 == pane { print $5, $6; exit }')"
+  else
+    [ -n "$c2" ] || c2=1
+    target="$(printf '%s\n' "$records" | awk \
+      -v ws="$active" -v tab="$c1" -v pane="$c2" \
+      '$1 == "W" && $5 == ws && $3 == tab && $4 == pane { print $5, $6; exit }')"
+  fi
+
+  if [ -z "$target" ]; then
+    if [ -n "$c3" ]; then
+      _cdd_resolve_error="no pane at workspace $c1, tab $c2, pane $c3"
+    else
+      _cdd_resolve_error="no pane at tab $c1, pane $c2"
+    fi
+    return 1
+  fi
+
+  local ws_id pane_id
+  read -r ws_id pane_id <<<"$target"
+  if [ -n "$session" ]; then
+    scope="${CDD_KEY_PREFIX}$(printf '%s' "$session" | sed 's/[:,]/_/g')"
+  else
+    scope="$CDD_KEY_SCOPE"
+  fi
+  _cdd_resolved_key="${scope},${ws_id}.${pane_id}"
+  return 0
+}
+
+
+# Print "session|c1|c2|c3" when $1 is a position key, otherwise fail.
+# Position levels: c1=tab, c1.c2=tab.pane, c1.c2.c3=workspace.tab.pane.
+# A leading "<session>," targets another Herdr session.
+_cdd_herdr_position_parts() {
+  local key="$1" session pos
+
+  case "$key" in
+    *,*)
+      session="${key%%,*}"
+      pos="${key#*,}"
+      case "$session" in
+        ''|*[!A-Za-z0-9_-]*) return 1 ;;
+      esac
+      ;;
+    *)
+      session=
+      pos="$key"
+      ;;
+  esac
+
+  case "$pos" in
+    ''|.*|*.|*..*|*[!0-9.]*) return 1 ;;
+  esac
+
+  # Use read so that splitting also works with zsh, which does not split
+  # unquoted expansions like bash does.
+  local c1 c2 c3 rest
+  IFS=. read -r c1 c2 c3 rest <<<"$pos"
+  [ -z "$rest" ] || return 1
+  [ -n "$c1" ] || return 1
+
+  local part
+  for part in "$c1" "$c2" "$c3"; do
+    [ -n "$part" ] || continue
+    [ "$part" -ge 1 ] 2>/dev/null || return 1
+  done
+
+  printf '%s|%s|%s|%s\n' "$session" "$c1" "$c2" "$c3"
+}
+
+
+# Expand a user key to the key used in $CDD_FILE.
+# Herdr position keys are resolved against the live session here.
+_cdd_expand_key() {
+  local key="$1" parts session c1 c2 c3 resolved
+
+  if [ "$CDD_BACKEND" != herdr ]; then
+    echo "$key"
+    return 0
+  fi
+
+  if parts="$(_cdd_herdr_position_parts "$key")"; then
+    IFS='|' read -r session c1 c2 c3 <<<"$parts"
+    if [ -z "$session" ] && [ -z "$CDD_SESSION" ]; then
+      echo "cdd: $key: not inside a herdr pane" >&2
+      return 1
+    fi
+    if _cdd_herdr_resolve_position "$session" "$c1" "$c2" "$c3"; then
+      resolved="$_cdd_resolved_key"
+      # Prefer the resolved pane when its directory is registered.
+      if [ -f "$CDD_FILE" ] && _cdd_lookup "$resolved" >/dev/null 2>&1; then
+        echo "$resolved"
+        return 0
+      fi
+      # Session-qualified keys may also be literal keys (for example tmux).
+      if [ -n "$session" ] && [ -f "$CDD_FILE" ] && \
+         _cdd_lookup "$key" >/dev/null 2>&1; then
+        echo "$key"
+        return 0
+      fi
+      echo "$resolved"
+      return 0
+    fi
+    if [ -n "$session" ] && [ -f "$CDD_FILE" ] && \
+       _cdd_lookup "$key" >/dev/null 2>&1; then
+      echo "$key"
+      return 0
+    fi
+    echo "cdd: $key: $_cdd_resolve_error" >&2
+    return 1
+  fi
+
+  echo "$key"
 }
 
 
@@ -115,11 +555,14 @@ _cdd_cd() {
     return 2
   fi
 
-  local key="$(_cdd_canonicalize_key "$1")"
+  local key
+  if ! key="$(_cdd_expand_key "$1")"; then
+    return 3
+  fi
+  key="$(_cdd_canonicalize_key "$key")"
 
-  local match="$(grep "^$key:" "$CDD_FILE")"
-  if [ -n "$match" ]; then
-    local dir="${match##*:}"
+  local dir
+  if dir="$(_cdd_lookup "$key")" && [ -n "$dir" ]; then
     echo "cd $dir"
     cd "$(echo "$dir" | sed "s;^~;$HOME;")"
 
@@ -132,10 +575,40 @@ _cdd_cd() {
 
 
 _cdd_add() {
-  local key="${1%%:*}"
+  local key="$1"
   local dir="$2"
+  local _cdd_head _cdd_rest _cdd_pane _cdd_split_dir
 
-  local _dir
+  # "cdd add <key>:<directory>" is supported when <directory> is omitted.
+  # Herdr pane IDs contain ':' (e.g. w4:p2), so split them carefully.
+  if [ -z "$dir" ] && [ -n "$key" ]; then
+    case "$key" in
+      w*:p*)
+        _cdd_head="${key%%:*}"
+        _cdd_rest="${key#*:}"
+        _cdd_pane="${_cdd_rest%%:*}"
+        if [ "$_cdd_rest" = "$_cdd_pane" ]; then
+          _cdd_split_dir=
+        else
+          _cdd_split_dir="${_cdd_rest#*:}"
+        fi
+        if _cdd_herdr_id_ok "$_cdd_head" && _cdd_herdr_id_ok "$_cdd_pane"; then
+          key="$_cdd_head:$_cdd_pane"
+          dir="$_cdd_split_dir"
+        else
+          dir="${key#*:}"; key="${key%%:*}"
+        fi
+        ;;
+      *:*) dir="${key#*:}"; key="${key%%:*}" ;;
+    esac
+  fi
+
+  if ! key="$(_cdd_expand_key "$key")"; then
+    return 3
+  fi
+  key="$(_cdd_canonicalize_key "$key")"
+
+  local _dir result
   if [ -n "$dir" ]; then
     local _cdd_auto="$CDD_AUTO"
     CDD_AUTO=0
@@ -160,11 +633,14 @@ _cdd_delete() {
     return 2
   fi
 
-  local key="$(_cdd_canonicalize_key "$1")"
+  local key
+  if ! key="$(_cdd_expand_key "$1")"; then
+    return 3
+  fi
+  key="$(_cdd_canonicalize_key "$key")"
 
-  if grep "^$key:" "$CDD_FILE" >/dev/null; then
-    sed -i.tmp -e "/^$key\:/d" "$CDD_FILE"
-    rm -f "$CDD_FILE.tmp"
+  if _cdd_lookup "$key" >/dev/null; then
+    _cdd_remove_key "$key"
   else
     echo "cdd: $key: No such key"$'\n' >&2
     _cdd_help
@@ -174,16 +650,42 @@ _cdd_delete() {
 
 
 _cdd_canonicalize_key() {
-  local key="${1%%:*}"
+  local key="$1"
+
+  if [ "$CDD_BACKEND" = herdr ]; then
+    local ws pane rest tail
+    case "$key" in
+      w*:*)
+        ws="${key%%:*}"; rest="${key#*:}"; pane="${rest%%:*}"; tail="${rest#*:}"
+        if [ "$tail" = "$rest" ] && \
+           _cdd_herdr_id_ok "$ws" && _cdd_herdr_id_ok "$pane"; then
+          key="${CDD_KEY_SCOPE},${ws}.${pane}"
+        fi
+        ;;
+      w*.*)
+        ws="${key%%.*}"; pane="${key#*.}"
+        if _cdd_herdr_id_ok "$ws" && _cdd_herdr_id_ok "$pane"; then
+          key="${CDD_KEY_SCOPE},${ws}.${pane}"
+        fi
+        ;;
+      p*)
+        if _cdd_herdr_id_ok "$key"; then
+          key="${CDD_KEY_SCOPE},${CDD_WINDOW}.${key}"
+        fi
+        ;;
+    esac
+    echo "$key"
+    return
+  fi
 
   if echo "$key" | grep '^\(.\+,\)\?[0-9]\+\.\?$' >/dev/null; then
     if [[ $key != *. ]]; then
       key="$key."
     fi
-    key="${key}0"
+    key="${key}${CDD_DEFAULT_PANE}"
   fi
-  if echo "$key" | grep '^[0-9]\+.[0-9]\+$' >/dev/null; then
-    key="${CDD_SESSION:-_},$key"
+  if echo "$key" | grep '^[0-9]\+\.[0-9]\+$' >/dev/null; then
+    key="${CDD_KEY_SCOPE:-_},$key"
   fi
 
   echo "$key"
@@ -195,8 +697,7 @@ _cdd_register() {
   local dir="$2"
 
   if [ -f "$CDD_FILE" ]; then
-    sed -i.tmp -e "/^$key\:/d" "$CDD_FILE"
-    rm -f "$CDD_FILE.tmp"
+    _cdd_remove_key "$key"
   fi
 
   dir="$(echo "$dir" | sed "s;^$HOME;~;")"
@@ -204,19 +705,33 @@ _cdd_register() {
 }
 
 
+# Herdr entries of the current scope are shown as stable pane IDs (w4:p2)
+# so that completion never suggests ambiguous position keys.
 _cdd_comp() {
   local mode="$1"
   local -i CURRENT="$2"
   local command="$3"
+  local line
 
   [ -f "$CDD_FILE" ] || return
 
   if (( CURRENT == 3 )) && [[ $command = delete ]] || (( CURRENT == 2 )); then
-    _cdd_opts="$(sed "s/^${CDD_SESSION:-_},//" "$CDD_FILE")"
+    _cdd_opts="$(while IFS= read -r line; do
+      printf '%s\n' "${line#"${CDD_KEY_SCOPE:-_},"}"
+    done < "$CDD_FILE")"
     _cdd_descr='cdd directory'
 
-    if [ "$mode" = zsh ]; then
-      _cdd_opts="$(echo "$_cdd_opts" | sed 's/\.0:/:/')"
+    if [ "$CDD_BACKEND" = herdr ]; then
+      # w4.p2:dir -> w4:p2:dir, so candidates are never mistaken for
+      # the numeric position keys.
+      _cdd_opts="$(printf '%s\n' "$_cdd_opts" | \
+        sed 's/^\(w[0-9A-Z]*\)\.\(p[0-9A-Z]*\):/\1:\2:/')"
+      if [ "$mode" = zsh ]; then
+        _cdd_opts="$(printf '%s\n' "$_cdd_opts" | \
+          sed 's/^\(w[0-9A-Z]*\):\(p[0-9A-Z]*\):/\1\\:\2:/')"
+      fi
+    elif [ "$mode" = zsh ]; then
+      _cdd_opts="$(echo "$_cdd_opts" | sed "s;\\.${CDD_DEFAULT_PANE}:;:;")"
     fi
 
   elif (( CURRENT == 3 )) && [[ $command = add ]]; then
